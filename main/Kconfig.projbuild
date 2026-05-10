@@ -1,0 +1,27 @@
+menu "esp32-fw — Application"
+
+    config FW_OTA_TOKEN
+        string "OTA shared secret"
+        default ""
+        help
+            Shared secret that clients must present in the X-OTA-Token header
+            when calling POST /ota. Pick a long random string. The endpoint
+            refuses requests when this is empty.
+
+    config FW_HTTP_PORT
+        int "HTTP control server port"
+        default 80
+        range 1 65535
+        help
+            Port for the control / OTA HTTP server. Bound to 0.0.0.0 so it
+            answers on both the local WiFi IP and the Tailscale IP.
+
+    config FW_OTA_SKIP_CERT_CHECK
+        bool "Skip TLS cert validation on OTA pulls (debug only)"
+        default n
+        help
+            Allow https:// OTA URLs to be fetched without verifying the
+            server certificate. Useful for self-signed dev servers. Leave
+            disabled in production.
+
+endmenu
