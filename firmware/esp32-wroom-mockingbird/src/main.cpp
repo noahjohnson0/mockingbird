@@ -41,6 +41,8 @@
 #include <esp_system.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "secrets.h"
 
@@ -164,6 +166,21 @@ static bool uplink_connect() {
     if (fd >= 0) {
         struct timeval to = {1, 0};
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+
+        // TCP keepalive: detect half-open connections that the application
+        // layer can't see. Without these, a leaf can sit happily writing
+        // bytes into a dead socket's local TX buffer for minutes before
+        // realizing nothing is being delivered. With these, the kernel
+        // probes at IDLE seconds of silence, retries every INTVL, gives
+        // up after CNT misses → dead connection detected in ~25 s.
+        int on = 1;
+        int idle = 15;   // seconds of idle before first probe
+        int intvl = 5;   // seconds between probes
+        int cnt = 2;     // probes before giving up
+        setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &on,    sizeof(on));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
     }
 
     char hello[200];

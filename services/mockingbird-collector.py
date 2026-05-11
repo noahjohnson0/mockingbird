@@ -222,10 +222,30 @@ async def handle_client(
     leaf: str | None = None
     log.info(f"connection from {peer}")
 
+    # Pi-side TCP keepalive too — symmetric with the firmware change.
+    # When a leaf disappears (power, WiFi drop, crash), we don't want the
+    # zombie socket sitting in ESTABLISHED for 120 s waiting on readline().
+    # Kernel probes at IDLE silence, retries every INTVL, gives up after CNT.
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            import socket as _socket
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE,  15)
+            sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 5)
+            sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT,   2)
+        except (OSError, AttributeError):
+            pass  # macOS / older kernels may not have all options
+
     try:
         while True:
             try:
-                line = await asyncio.wait_for(reader.readline(), timeout=120)
+                # With TCP keepalive enabled (above), a dead peer is killed
+                # by the kernel in ~25 s. Drop the application-layer idle
+                # timeout to 45 s (still > the leaf's 5 s heartbeat interval
+                # with headroom for one missed hb) so a silent leaf at the
+                # application layer doesn't tie up a connection forever.
+                line = await asyncio.wait_for(reader.readline(), timeout=45)
             except asyncio.TimeoutError:
                 log.warning(f"{leaf or peer}: idle timeout, closing")
                 break
