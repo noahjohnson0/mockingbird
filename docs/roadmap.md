@@ -6,6 +6,87 @@ to "in flight" when started, to "shipped" once landed in `main`, and to
 
 ## Planned
 
+### Person fingerprinting + schedule mining
+The big one. Turn the BLE mesh into a household-level presence + identity
+system: who is home, where in the house, how fast moving, what
+schedule do they keep. Achievable in phases:
+
+**Phase 1 — Co-occurrence clustering (data we already have, no extra hardware).**
+Apple Continuity rotates MAC addresses every ~15 min, so you can't track
+"MAC X = person Y." But each person carries 2–4 BLE radios (phone +
+AirPods + watch + laptop) that are physically colocated. Cluster MACs
+by:
+- shared 10-s time buckets
+- similar 4-leaf RSSI signature in those buckets
+- Jaccard similarity ≥ 60% on (bucket, leaf, rssi_bin) tuples
+A 30-min snapshot already shows 4 distinct gadget clusters with no
+tuning — see the demo `scripts/cooccurrence-demo.py` output in
+commit history. Result: anonymous "person 1, 2, 3, 4" buckets.
+
+**Phase 2 — Stable identity from Apple Continuity sub-protocols.**
+Apple's BLE advertisements include a `protocol_type` byte inside the
+manufacturer-data payload (0x10 nearby-info, 0x07 AirPods, 0x05 handoff,
+0x09 Watch, etc.). Even when the MAC rotates, the same physical device
+keeps advertising the same sub-protocol. Combined with always-present
+auxiliary fields (signal strength, action flag, etc.), this gives a
+multi-bit per-device fingerprint that survives MAC rotation. Parser
+lives in `services/apple_continuity.py`. Cluster the rotating MACs by
+identical sub-protocol fingerprints to get **stable device identity**.
+
+**Phase 3 — Person identity (you tag the cluster).**
+A small `persons` table in the DB plus a one-time CLI prompt:
+"This cluster is usually here Mon-Fri 9-5 with RSSI -50/-70/-80/-50.
+Call it: ___?" You type `noah`. Future appearances of the cluster
+fingerprint resolve to `noah`. Self-corrects over time when you flag
+mislabels.
+
+**Phase 4 — Walking speed + trajectory (needs leaf positions).**
+Per-device timeline:
+```
+  t=0   leaf-bedroom    RSSI -45  ← peak (closest)
+  t=2s  leaf-livingroom RSSI -45  ← peak (handoff)
+  t=4s  leaf-kitchen    RSSI -50  ← still moving
+```
+With known `(x,y,z)` for each leaf, derive a position over time. Speed =
+position derivative. Typical walking pace 1.4 m/s; jog 3 m/s; standing
+still ≪0.1 m/s. Gait *fingerprint* per person: dominant frequency
+(steps/sec), typical speed, acceleration profile. Distinguishes Noah's
+walk from his housemate's walk.
+
+**Phase 5 — Schedule discovery.**
+Per-person appearance timeline → hour-of-day + day-of-week histograms
+→ k-means or DBSCAN over the heatmap → discrete schedule clusters
+(e.g. "wakes 7-8 AM weekdays, leaves the house 9-10, returns 6-7 PM").
+Trivial Python sklearn or even just numpy. Output as a calendar-ish
+visualization.
+
+**Phase 6 — Anomaly detection.**
+Once schedules are stable, flag deviations: "Noah usually leaves by
+9 AM Mon-Fri, hasn't moved today" → push to phone (via Home Assistant
+or pushover). "Stranger fingerprint appeared at 3 AM with no prior
+visits" → alert.
+
+**What's needed in the platform**:
+- New DB tables: `person`, `device_cluster`, `cluster_member`,
+  `fingerprint_event`, `person_appearance`
+- A `services/mockingbird-classifier.py` daemon that tails the obs
+  stream and updates clusters / appearances in real time
+- Periodic retraining cron (nightly) that re-clusters with the
+  accumulated data
+- HTTP API for the analyzer / dashboard to query "who is currently
+  here" and "schedule for X person"
+
+**Honest about hard parts**:
+- Person ambiguity when multiple people in the same room — gadget
+  clusters merge in RSSI space. Disambiguates over time as they
+  separate.
+- Visitors with no prior fingerprint get tagged as "unknown #1, #2"
+  until you label them.
+- Apple Continuity is well-understood but Samsung/Microsoft/Google
+  use different patterns — separate parsers per ecosystem.
+- Privacy implications are real. This is *household-level* —
+  obviously don't expose any of this past the tailnet.
+
 ### IMU (accelerometer + gyroscope) on each leaf
 Add a 6-axis IMU (MPU6050 / LSM6DSO / similar — I²C, ~$2 each) to every
 leaf. Three concrete payoffs:
