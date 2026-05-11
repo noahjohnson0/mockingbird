@@ -269,6 +269,49 @@
   }
   #view-cube:active { cursor: grabbing; }
   #view-cube canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
+  /* stats pane */
+  .stat-card {
+    background: #14181f; border: 1px solid #232730; border-radius: 6px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .stat-card h3 {
+    margin: 0 0 8px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #6b7280; font-weight: 600;
+  }
+  .stat-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px;
+    font-size: 11px;
+  }
+  .stat-grid > div > .k { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-grid > div > .v {
+    color: #e6e9ef; font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 13px; margin-top: 2px;
+  }
+  .stat-bar-fill {
+    height: 4px; border-radius: 2px; background: #1d6fef;
+    transition: width 240ms ease-out;
+  }
+  .stat-bar-fill.warn { background: #f59e0b; }
+  .stat-bar-fill.err  { background: #ef4444; }
+  .stat-bar-bg {
+    height: 4px; background: #0c0d10; border-radius: 2px;
+    margin-top: 3px; overflow: hidden;
+  }
+  .leaf-stat-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px; align-items: center;
+    padding: 6px 4px; border-bottom: 1px solid #1f2227;
+    font-size: 11px; font-family: ui-monospace, "SF Mono", monospace;
+  }
+  .leaf-stat-row:last-child { border-bottom: 0; }
+  .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; }
+  .leaf-stat-row .stale { color: #f59e0b; }
+  .leaf-stat-row .ok    { color: #22c55e; }
+  .leaf-stat-head {
+    color: #6b7280; font-size: 9px; text-transform: uppercase;
+    letter-spacing: 0.06em; padding: 4px;
+    display: grid; grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px;
+  }
 </style>
 </head>
 <body>
@@ -298,6 +341,7 @@
   <div class="tabs">
     <div class="tab active" data-tab="setup">Setup</div>
     <div class="tab" data-tab="live">Live<span class="pulse" style="display:none" id="live-pulse"></span></div>
+    <div class="tab" data-tab="stats">Stats</div>
   </div>
 
 <div class="pane active" id="setup-pane">
@@ -316,6 +360,14 @@
       north (°clockwise from +y / room "depth" axis)
     </div>
     <input type="number" step="1" id="room-north" placeholder="0" style="margin-top:4px; width:80px">
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px; cursor:pointer; font-size:11px; color:#cdd1d7">
+      <input type="checkbox" id="room-ground-floor" style="appearance:none; width:14px; height:14px; border:1px solid #2a2e36; border-radius:3px; background:#0c0d10; cursor:pointer; position:relative;">
+      <span>ground floor — nothing below me</span>
+    </label>
+    <style>
+      #room-ground-floor:checked { background:#1d6fef !important; border-color:#1d6fef !important; }
+      #room-ground-floor:checked::after { content:'✓'; position:absolute; left:1px; top:-3px; color:white; font-size:11px; font-weight:700; }
+    </style>
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
   </div>
 
@@ -406,6 +458,36 @@
     not movement. Future work: cluster MACs by RSSI fingerprint similarity.
   </div>
 </div><!-- /live-pane -->
+
+<div class="pane" id="stats-pane">
+  <h1>system stats</h1>
+  <div class="sub">Pi health + per-leaf streaming state. Refreshes every 3 s.</div>
+
+  <div class="stat-card">
+    <h3>raspberry pi</h3>
+    <div class="stat-grid" id="pi-grid">
+      <div><div class="k">load avg</div><div class="v" id="pi-load">—</div></div>
+      <div><div class="k">uptime</div><div class="v" id="pi-uptime">—</div></div>
+      <div><div class="k">memory</div><div class="v" id="pi-mem">—</div><div class="stat-bar-bg"><div class="stat-bar-fill" id="pi-mem-bar" style="width:0%"></div></div></div>
+      <div><div class="k">disk</div><div class="v" id="pi-disk">—</div><div class="stat-bar-bg"><div class="stat-bar-fill" id="pi-disk-bar" style="width:0%"></div></div></div>
+      <div><div class="k">obs.sqlite</div><div class="v" id="pi-db">—</div></div>
+      <div><div class="k">total obs rate</div><div class="v" id="pi-obs-rate">—</div></div>
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <h3>leaves</h3>
+    <div class="leaf-stat-head">
+      <div>leaf</div>
+      <div>uptime · hb age</div>
+      <div>obs/s · sent · drop</div>
+      <div>wifi · heap · q</div>
+    </div>
+    <div id="leaf-stats">
+      <div class="empty" style="padding: 12px 0; color:#6b7280; font-style:italic">switch to Stats to start polling…</div>
+    </div>
+  </div>
+</div><!-- /stats-pane -->
 
 </div>
 
@@ -1333,6 +1415,7 @@ async function refreshRoom({ syncForm = false } = {}) {
       document.getElementById('room-h').value     = r.height ?? '';
       document.getElementById('room-notes').value = r.notes ?? '';
       document.getElementById('room-north').value = r.north_deg ?? 0;
+      document.getElementById('room-ground-floor').checked = !!r.is_ground_floor;
       roomFormHydrated = true;
     }
   } catch (e) { console.error(e); }
@@ -1345,19 +1428,18 @@ const roomAutoSave = debounce(async () => {
   const h = parseFloat(document.getElementById('room-h').value);
   const north_deg = parseFloat(document.getElementById('room-north').value) || 0;
   const notes = document.getElementById('room-notes').value;
-  // Silently skip incomplete entries — user is still typing
+  const is_ground_floor = document.getElementById('room-ground-floor').checked;
   if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return;
   try {
     const r = await fetch('/api/room', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
+      body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes, is_ground_floor }),
     });
     if (r.ok) {
-      // Soft refresh: only the 3D scene + north arrow, keep form values.
       const fresh = await r.json();
       rebuildRoom(fresh.width, fresh.depth, fresh.height);
       setNorthRotation(fresh.north_deg || 0);
-      toast(`room ${w}×${d}×${h} m · N=${north_deg}°`);
+      toast(`room ${w}×${d}×${h} m · N=${north_deg}°${fresh.is_ground_floor ? ' · ground floor' : ''}`);
     } else {
       toast('save failed: ' + (await r.text()), 'err');
     }
@@ -1367,6 +1449,7 @@ const roomAutoSave = debounce(async () => {
 for (const id of ['room-w', 'room-d', 'room-h', 'room-north', 'room-notes']) {
   document.getElementById(id).addEventListener('input', roomAutoSave);
 }
+document.getElementById('room-ground-floor').addEventListener('change', roomAutoSave);
 
 async function refresh({ force = false } = {}) {
   startFetch();
@@ -1506,8 +1589,6 @@ function setTab(name) {
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === name + '-pane'));
   if (name === 'live') {
     livePulse.style.display = 'inline-block';
-    // First open: replace placeholder with a spinner immediately so the
-    // tab feels alive while the first /api/live request is in flight.
     if (!_liveFirstPollDone) {
       liveRowByTrack.clear();
       liveListEl.innerHTML = `
@@ -1521,6 +1602,94 @@ function setTab(name) {
   } else {
     livePulse.style.display = 'none';
     if (liveTimer != null) { clearInterval(liveTimer); liveTimer = null; }
+  }
+  if (name === 'stats') {
+    pollStats();
+    if (statsTimer == null) statsTimer = setInterval(pollStats, 3000);
+  } else {
+    if (statsTimer != null) { clearInterval(statsTimer); statsTimer = null; }
+  }
+}
+
+// ---- stats tab ----
+let statsTimer = null;
+function fmtUptime(s) {
+  if (!s || s < 0) return '—';
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h ${m}m`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m ${s % 60}s`;
+}
+function fmtBytes(b) {
+  if (b == null) return '—';
+  if (b >= 1024**3) return (b / 1024**3).toFixed(1) + ' GB';
+  if (b >= 1024**2) return (b / 1024**2).toFixed(1) + ' MB';
+  if (b >= 1024)    return (b / 1024).toFixed(1) + ' KB';
+  return b + ' B';
+}
+function fmtNum(n) { return n == null ? '—' : n.toLocaleString(); }
+function barClass(pct) { return pct > 90 ? 'err' : pct > 75 ? 'warn' : ''; }
+
+async function pollStats() {
+  try {
+    const r = await fetch('/api/system').then(r => r.json());
+    const pi = r.pi || {};
+    document.getElementById('pi-load').textContent = pi.load_avg ? pi.load_avg.map(x => x.toFixed(2)).join(' · ') : '—';
+    document.getElementById('pi-uptime').textContent = fmtUptime(pi.uptime_s);
+    if (pi.mem_total_kb && pi.mem_available_kb != null) {
+      const used = pi.mem_total_kb - pi.mem_available_kb;
+      document.getElementById('pi-mem').textContent =
+        `${(used/1024).toFixed(0)} / ${(pi.mem_total_kb/1024).toFixed(0)} MB (${pi.mem_used_pct}%)`;
+      const bar = document.getElementById('pi-mem-bar');
+      bar.style.width = pi.mem_used_pct + '%';
+      bar.className = 'stat-bar-fill ' + barClass(pi.mem_used_pct);
+    }
+    if (pi.disk_total_gb != null) {
+      document.getElementById('pi-disk').textContent =
+        `${(pi.disk_total_gb - pi.disk_free_gb).toFixed(1)} / ${pi.disk_total_gb} GB (${pi.disk_used_pct}%)`;
+      const bar = document.getElementById('pi-disk-bar');
+      bar.style.width = pi.disk_used_pct + '%';
+      bar.className = 'stat-bar-fill ' + barClass(pi.disk_used_pct);
+    }
+    document.getElementById('pi-db').textContent = pi.db_size_mb != null ? pi.db_size_mb + ' MB' : '—';
+    const totalObs = (r.leaves || []).reduce((s, L) => s + (L.obs_per_s || 0), 0);
+    document.getElementById('pi-obs-rate').textContent = `${totalObs.toFixed(1)} obs/s across ${(r.leaves || []).length} leaves`;
+    // Leaf rows — incremental upsert keyed by leaf name
+    const host = document.getElementById('leaf-stats');
+    host.innerHTML = '';
+    for (const L of r.leaves || []) {
+      const ageCls = L.hb_age_s > 30 ? 'stale' : 'ok';
+      const obsCls = L.obs_per_s > 5 ? 'ok' : L.obs_per_s > 0 ? '' : 'stale';
+      const dropPct = L.n_sent ? Math.round(100 * L.n_dropped / (L.n_sent + L.n_dropped)) : 0;
+      const row = document.createElement('div');
+      row.className = 'leaf-stat-row';
+      row.innerHTML = `
+        <div class="lname">${L.leaf.replace('mockingbird-', '')}</div>
+        <div>
+          ${fmtUptime(L.uptime_s)}<br>
+          <span class="${ageCls}" style="font-size:10px">hb ${L.hb_age_s}s ago</span>
+        </div>
+        <div>
+          <span class="${obsCls}">${L.obs_per_s.toFixed(1)}/s</span><br>
+          <span style="font-size:10px; color:#6b7280">
+            sent ${fmtNum(L.n_sent)} · drop ${fmtNum(L.n_dropped)} (${dropPct}%)
+          </span>
+        </div>
+        <div>
+          ${L.wifi_rssi} dBm<br>
+          <span style="font-size:10px; color:#6b7280">
+            heap ${fmtBytes(L.heap_free)} · q=${L.q_depth}
+          </span>
+        </div>
+      `;
+      host.appendChild(row);
+    }
+    if ((r.leaves || []).length === 0) {
+      host.innerHTML = '<div class="empty" style="padding:12px 0; color:#6b7280; font-style:italic">no leaves heard from in 5 min</div>';
+    }
+  } catch (e) {
+    console.error('pollStats', e);
   }
 }
 document.querySelectorAll('.tab').forEach(t => {
