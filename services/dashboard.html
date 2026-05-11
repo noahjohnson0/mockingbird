@@ -133,11 +133,59 @@
     padding: 10px; background: #14181f; border-radius: 4px;
     border-left: 2px solid #f59e0b;
   }
+  /* scene loading overlay — visible from first paint, fades out
+     once Three.js has rendered its first frame and data has arrived */
+  #scene-loader {
+    position: absolute; inset: 0; display: flex;
+    flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none; background: #0c0d10;
+    transition: opacity 320ms ease-out;
+    z-index: 5;
+  }
+  #scene-loader.hidden { opacity: 0; }
+  #scene-loader.gone   { display: none; }
+  .spinner {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 3px solid #1f2227; border-top-color: #1d6fef;
+    animation: spin 800ms linear infinite;
+  }
+  .spinner.sm { width: 22px; height: 22px; border-width: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #scene-loader .stage {
+    margin-top: 14px; color: #6b7280; font-size: 12px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    letter-spacing: 0.04em;
+  }
+  /* small spinner pinned to top-right of the scene for ongoing refetches */
+  #scene-busy {
+    position: absolute; top: 12px; right: 12px;
+    opacity: 0; transition: opacity 180ms ease-out;
+    z-index: 4; pointer-events: none;
+  }
+  #scene-busy.visible { opacity: 0.75; }
+  /* live-pane spinner state */
+  .live-loader {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 24px 0; gap: 10px;
+    color: #6b7280; font-size: 12px;
+  }
+  /* fade-in for first piece of data */
+  @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+  .fadein { animation: fadein 240ms ease-out; }
+  #scene { position: relative; }
 </style>
 </head>
 <body>
 <div id="toast-host"></div>
-<div id="scene"></div>
+<div id="scene">
+  <!-- Visible from very first paint, before Three.js loads. JS hides
+       this once the scene has rendered its first frame + leaves are in. -->
+  <div id="scene-loader">
+    <div class="spinner"></div>
+    <div class="stage" id="scene-loader-stage">loading 3D engine…</div>
+  </div>
+  <div id="scene-busy"><div class="spinner sm"></div></div>
+</div>
 <div id="side">
   <div class="tabs">
     <div class="tab active" data-tab="setup">Setup</div>
@@ -238,6 +286,39 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// ---- scene loader stages ----
+// The loader DOM is in the HTML so it paints instantly. We advance the
+// stage text as work happens, then hide once we've rendered ≥1 frame
+// AND the first /api/leaves response has arrived.
+const loaderEl = document.getElementById('scene-loader');
+const loaderStageEl = document.getElementById('scene-loader-stage');
+const sceneBusyEl = document.getElementById('scene-busy');
+let _firstFrameDrawn = false;
+let _firstLeavesIn = false;
+function setLoaderStage(text) { loaderStageEl.textContent = text; }
+function maybeDismissLoader() {
+  if (_firstFrameDrawn && _firstLeavesIn) {
+    loaderEl.classList.add('hidden');
+    setTimeout(() => loaderEl.classList.add('gone'), 360);
+  }
+}
+// Safety net: never block the page on the loader for more than 6 s.
+// If Three.js or the CDN is slow/dead, fade the spinner anyway so the
+// user at least sees the side panel and any cached state.
+setTimeout(() => {
+  if (!loaderEl.classList.contains('hidden')) {
+    setLoaderStage('still loading… (network slow?)');
+  }
+}, 3000);
+setTimeout(() => {
+  loaderEl.classList.add('hidden');
+  setTimeout(() => loaderEl.classList.add('gone'), 360);
+}, 6000);
+// Track in-flight fetches → toggle the small top-right spinner
+let _inflight = 0;
+function startFetch() { if (++_inflight === 1) sceneBusyEl.classList.add('visible'); }
+function endFetch()   { if (--_inflight <= 0) { _inflight = 0; sceneBusyEl.classList.remove('visible'); } }
 
 // ---- toast notifications ----
 const toastHost = document.getElementById('toast-host');
@@ -517,7 +598,13 @@ function loop() {
   tickDeviceAnimation();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
+  if (!_firstFrameDrawn) {
+    _firstFrameDrawn = true;
+    setLoaderStage('fetching leaves…');
+    maybeDismissLoader();
+  }
 }
+setLoaderStage('compiling scene…');
 loop();
 
 // ---- leaves ----
@@ -692,6 +779,7 @@ function renderSide(leaves, { force = false } = {}) {
 
 let roomFormHydrated = false;  // input fields only set on first load + after save
 async function refreshRoom({ syncForm = false } = {}) {
+  startFetch();
   try {
     const r = await fetch('/api/room').then(r => r.json());
     // 3D scene updates always (these don't touch inputs)
@@ -713,6 +801,7 @@ async function refreshRoom({ syncForm = false } = {}) {
       roomFormHydrated = true;
     }
   } catch (e) { console.error(e); }
+  finally { endFetch(); }
 }
 
 const roomAutoSave = debounce(async () => {
@@ -745,12 +834,21 @@ for (const id of ['room-w', 'room-d', 'room-h', 'room-north', 'room-notes']) {
 }
 
 async function refresh({ force = false } = {}) {
+  startFetch();
   try {
     const leaves = await fetch('/api/leaves').then(r => r.json());
     renderLeaves(leaves);
     renderSide(leaves, { force });
+    if (!_firstLeavesIn) {
+      _firstLeavesIn = true;
+      setLoaderStage('ready');
+      maybeDismissLoader();
+    }
   } catch (e) {
     console.error(e);
+    if (!_firstLeavesIn) setLoaderStage('error — retrying…');
+  } finally {
+    endFetch();
   }
 }
 
@@ -766,7 +864,9 @@ const liveCountEl = document.getElementById('live-count');
 const liveAsofEl = document.getElementById('live-asof');
 const liveListEl = document.getElementById('live-list');
 
+let _liveFirstPollDone = false;
 async function pollLive() {
+  startFetch();
   try {
     const r = await fetch('/api/live').then(r => r.json());
     applyLiveDevices(r.devices || []);
@@ -774,15 +874,16 @@ async function pollLive() {
     const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
     liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
     // sidebar list
+    const fade = _liveFirstPollDone ? '' : ' fadein';
     if (!r.devices || r.devices.length === 0) {
-      const note = r.note ? `<div class="empty">${r.note}</div>`
-                          : `<div class="empty">no Apple devices currently seen by ≥2 positioned leaves</div>`;
+      const note = r.note ? `<div class="empty${fade}">${r.note}</div>`
+                          : `<div class="empty${fade}">no Apple devices currently seen by ≥2 positioned leaves</div>`;
       liveListEl.innerHTML = note;
     } else {
       liveListEl.innerHTML = r.devices.map(d => {
         const col = '#' + macColor(d.mac).getHexString();
         const shortMac = d.mac.slice(-11);
-        return `<div class="dev-row">
+        return `<div class="dev-row${fade}">
           <span class="dev-dot" style="background:${col}"></span>
           <span class="dev-mac">${shortMac}</span>
           <span class="dev-rssi">${d.rssi_max} dBm</span>
@@ -790,8 +891,14 @@ async function pollLive() {
         </div>`;
       }).join('');
     }
+    _liveFirstPollDone = true;
   } catch (e) {
     console.error('pollLive', e);
+    if (!_liveFirstPollDone) {
+      liveListEl.innerHTML = '<div class="empty">poll failed — retrying…</div>';
+    }
+  } finally {
+    endFetch();
   }
 }
 
@@ -800,9 +907,17 @@ function setTab(name) {
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === name + '-pane'));
   if (name === 'live') {
     livePulse.style.display = 'inline-block';
+    // First open: replace placeholder with a spinner immediately so the
+    // tab feels alive while the first /api/live request is in flight.
+    if (!_liveFirstPollDone) {
+      liveListEl.innerHTML = `
+        <div class="live-loader">
+          <div class="spinner"></div>
+          <div>polling for nearby devices…</div>
+        </div>`;
+    }
     pollLive();
     if (liveTimer == null) liveTimer = setInterval(pollLive, 500);
-    // Hide leaf labels when in live mode? Keep them — they're useful spatial reference.
   } else {
     livePulse.style.display = 'none';
     if (liveTimer != null) { clearInterval(liveTimer); liveTimer = null; }
