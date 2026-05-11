@@ -1,0 +1,19 @@
+[Unit]
+Description=Mockingbird 3D room dashboard (Three.js HTTP server)
+After=network-online.target mockingbird-collector.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/mockingbird-dashboard.py
+Restart=always
+RestartSec=3
+User=pi
+Group=pi
+MemoryHigh=64M
+MemoryMax=96M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
