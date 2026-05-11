@@ -83,12 +83,68 @@
     background: #1c1f24; padding: 1px 6px; border-radius: 3px;
     font-family: ui-monospace; font-size: 10px; color: #cdd1d7;
   }
+  /* tabs */
+  .tabs {
+    display: flex; gap: 0; margin: -16px -16px 14px;
+    background: #0c0d10; border-bottom: 1px solid #1f2227;
+  }
+  .tab {
+    flex: 1; padding: 12px 0; text-align: center; cursor: pointer;
+    font-size: 12px; color: #6b7280; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-bottom: 2px solid transparent;
+    transition: color 120ms, border-color 120ms;
+  }
+  .tab:hover { color: #cdd1d7; }
+  .tab.active { color: #79c4ff; border-bottom-color: #1d6fef; }
+  .tab .pulse {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: #22c55e; margin-left: 6px; vertical-align: middle;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.45; transform: scale(0.7); }
+  }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  /* live pane */
+  .live-summary {
+    background: #1c1f24; border-radius: 6px; padding: 12px;
+    border: 1px solid #232730; margin-bottom: 10px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .live-count { font-size: 28px; font-weight: 700; color: #79c4ff; font-family: ui-monospace, monospace; }
+  .live-count-label { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .live-asof { color: #6b7280; font-size: 11px; margin-left: auto; font-family: ui-monospace, monospace; }
+  .dev-row {
+    background: #1c1f24; border-radius: 4px; padding: 8px 10px;
+    margin-bottom: 4px; border: 1px solid #232730;
+    display: flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, "SF Mono", monospace; font-size: 11px;
+  }
+  .dev-row .dev-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dev-row .dev-mac { color: #cdd1d7; flex: 1; }
+  .dev-row .dev-rssi { color: #79c4ff; }
+  .dev-row .dev-n { color: #6b7280; }
+  .dev-row.stale { opacity: 0.4; }
+  .live-note {
+    color: #6b7280; font-size: 11px; line-height: 1.5;
+    padding: 10px; background: #14181f; border-radius: 4px;
+    border-left: 2px solid #f59e0b;
+  }
 </style>
 </head>
 <body>
 <div id="toast-host"></div>
 <div id="scene"></div>
 <div id="side">
+  <div class="tabs">
+    <div class="tab active" data-tab="setup">Setup</div>
+    <div class="tab" data-tab="live">Live<span class="pulse" style="display:none" id="live-pulse"></span></div>
+  </div>
+
+<div class="pane active" id="setup-pane">
   <h1>mockingbird · room</h1>
   <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
 
@@ -145,6 +201,30 @@
     Refresh every 5 s. Updates persist to <code>leaf_position</code> in SQLite.<br>
     <span style="color:#fbbf24">●</span> origin marker · grid = 1 m squares
   </div>
+</div><!-- /setup-pane -->
+
+<div class="pane" id="live-pane">
+  <h1>live · device tracking</h1>
+  <div class="sub">Apple-fingerprint devices seen by ≥2 positioned leaves in the last 8 s, weighted-centroid positioned. Refreshes 2×/sec.</div>
+
+  <div class="live-summary">
+    <div class="live-count" id="live-count">·</div>
+    <div class="live-count-label">devices<br>in view</div>
+    <div class="live-asof" id="live-asof">—</div>
+  </div>
+
+  <h2>devices</h2>
+  <div id="live-list">
+    <div class="empty">switch to Live to start polling…</div>
+  </div>
+
+  <div class="live-note" style="margin-top:14px">
+    <strong>Note on Apple MAC rotation:</strong> phones/watches/AirPods rotate their advertised
+    BLE address every ~15 min. A dot that vanishes and a new one nearby is usually rotation,
+    not movement. Future work: cluster MACs by RSSI fingerprint similarity.
+  </div>
+</div><!-- /live-pane -->
+
 </div>
 
 <script type="importmap">
@@ -331,10 +411,100 @@ function fit() {
 addEventListener('resize', fit);
 fit();
 
+// ---- live device cluster rendering ----
+// Each detected device is a small glowing sphere; positions interpolate
+// smoothly toward their server-reported targets every frame (lerp at
+// ~0.06/frame ≈ visible smoothing over ~0.7 s at 60 fps).
+const deviceGroup = new THREE.Group();
+scene.add(deviceGroup);
+const deviceByMac = new Map();  // mac → { sphere, target: Vector3, labelEl, lastSeen, rssi }
+const LERP_RATE = 0.08;
+const STALE_AFTER_MS = 6000;  // start fading
+const REMOVE_AFTER_MS = 12000;
+
+// Color is a hash of the MAC so a given (rotated) address stays the same
+// hue while it's alive, and different devices look distinct.
+function macColor(mac) {
+  let h = 0;
+  for (let i = 0; i < mac.length; i++) h = (h * 31 + mac.charCodeAt(i)) | 0;
+  // Map hash → hue 0..360, keep saturation/lightness fixed for legibility
+  const hue = ((h % 360) + 360) % 360;
+  return new THREE.Color().setHSL(hue / 360, 0.7, 0.6);
+}
+
+function ensureDeviceSphere(mac) {
+  let entry = deviceByMac.get(mac);
+  if (entry) return entry;
+  const color = macColor(mac);
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 16, 12),
+    new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.6, transparent: true, opacity: 1.0,
+    })
+  );
+  // soft halo using a slightly larger sprite-like sphere
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 16, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false })
+  );
+  sphere.add(halo);
+  const labelEl = document.createElement('div');
+  labelEl.style.cssText = `
+    color: #e6e9ef; font: 10px ui-monospace, "SF Mono", monospace;
+    background: rgba(20,22,26,0.85); padding: 2px 5px; border-radius: 3px;
+    border: 1px solid #2a2e36; white-space: nowrap;
+  `;
+  const label = new CSS2DObject(labelEl);
+  label.position.set(0, 0.18, 0);
+  sphere.add(label);
+  deviceGroup.add(sphere);
+  entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0, rssi: -100, color, halo };
+  deviceByMac.set(mac, entry);
+  return entry;
+}
+
+function applyLiveDevices(devices) {
+  const now = performance.now();
+  for (const d of devices) {
+    const entry = ensureDeviceSphere(d.mac);
+    // room (x, y, z) → three (x, z, y)
+    entry.target.set(d.x, d.z, d.y);
+    entry.lastSeen = now;
+    entry.rssi = d.rssi_max;
+    // label: shortened MAC + dBm
+    const shortMac = d.mac.slice(-8);
+    entry.labelEl.textContent = `${shortMac} · ${d.rssi_max} dBm · ${d.n_leaves}L`;
+  }
+}
+
+function tickDeviceAnimation() {
+  const now = performance.now();
+  for (const [mac, e] of deviceByMac) {
+    e.sphere.position.lerp(e.target, LERP_RATE);
+    const age = now - e.lastSeen;
+    if (age > REMOVE_AFTER_MS) {
+      deviceGroup.remove(e.sphere);
+      deviceByMac.delete(mac);
+      continue;
+    }
+    if (age > STALE_AFTER_MS) {
+      const fade = Math.max(0, 1 - (age - STALE_AFTER_MS) / (REMOVE_AFTER_MS - STALE_AFTER_MS));
+      e.sphere.material.opacity = fade;
+      e.halo.material.opacity = fade * 0.18;
+      e.labelEl.style.opacity = fade;
+    } else {
+      e.sphere.material.opacity = 1;
+      e.halo.material.opacity = 0.18;
+      e.labelEl.style.opacity = 1;
+    }
+  }
+}
+
 // Render loop
 function loop() {
   requestAnimationFrame(loop);
   controls.update();
+  tickDeviceAnimation();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
 }
@@ -558,6 +728,59 @@ refresh();
 refreshRoom();
 setInterval(refresh, 5000);
 setInterval(refreshRoom, 8000);
+
+// ---- tabs + live polling ----
+let liveTimer = null;
+const livePulse = document.getElementById('live-pulse');
+const liveCountEl = document.getElementById('live-count');
+const liveAsofEl = document.getElementById('live-asof');
+const liveListEl = document.getElementById('live-list');
+
+async function pollLive() {
+  try {
+    const r = await fetch('/api/live').then(r => r.json());
+    applyLiveDevices(r.devices || []);
+    liveCountEl.textContent = (r.devices || []).length;
+    const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
+    liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
+    // sidebar list
+    if (!r.devices || r.devices.length === 0) {
+      const note = r.note ? `<div class="empty">${r.note}</div>`
+                          : `<div class="empty">no Apple devices currently seen by ≥2 positioned leaves</div>`;
+      liveListEl.innerHTML = note;
+    } else {
+      liveListEl.innerHTML = r.devices.map(d => {
+        const col = '#' + macColor(d.mac).getHexString();
+        const shortMac = d.mac.slice(-11);
+        return `<div class="dev-row">
+          <span class="dev-dot" style="background:${col}"></span>
+          <span class="dev-mac">${shortMac}</span>
+          <span class="dev-rssi">${d.rssi_max} dBm</span>
+          <span class="dev-n">${d.n_leaves}L</span>
+        </div>`;
+      }).join('');
+    }
+  } catch (e) {
+    console.error('pollLive', e);
+  }
+}
+
+function setTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === name + '-pane'));
+  if (name === 'live') {
+    livePulse.style.display = 'inline-block';
+    pollLive();
+    if (liveTimer == null) liveTimer = setInterval(pollLive, 500);
+    // Hide leaf labels when in live mode? Keep them — they're useful spatial reference.
+  } else {
+    livePulse.style.display = 'none';
+    if (liveTimer != null) { clearInterval(liveTimer); liveTimer = null; }
+  }
+}
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => setTab(t.dataset.tab));
+});
 </script>
 </body>
 </html>
