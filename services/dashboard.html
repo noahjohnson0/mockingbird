@@ -2028,6 +2028,7 @@ async function adIdentify() {
     if (!cands.length) {
       adResultsEl.innerHTML = '<div class="empty" style="font-size:11px">no candidates — try again, longer windows</div>';
       adGo.disabled = false;
+      adGo.textContent = 'Identify phone';
       return;
     }
     // Top candidates with action button
@@ -2061,6 +2062,9 @@ async function adIdentify() {
         adVisits = [];
       });
     });
+    // Re-enable button so user can re-run or click "use" buttons cleanly
+    adGo.disabled = false;
+    adGo.textContent = 'Identify phone (re-run)';
   } catch (e) {
     toast('network: ' + e.message, 'err');
     adGo.disabled = false;
