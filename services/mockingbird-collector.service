@@ -1,0 +1,20 @@
+[Unit]
+Description=Mockingbird BLE observation collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/mockingbird-collector.py
+Restart=always
+RestartSec=3
+User=pi
+Group=pi
+# Reasonable resource caps for a Pi Zero W (512 MB RAM).
+MemoryHigh=128M
+MemoryMax=192M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
