@@ -1,4 +1,4 @@
-# noahnet — project memory for Claude Code
+# mockingbird — project memory for Claude Code
 
 This file is what Claude reads when starting a new session in this repo. It
 captures decisions, hardware, and gotchas that aren't obvious from the code
@@ -11,11 +11,11 @@ of it over time; the network itself is the substrate. Built from the parts
 Noah already has on his desk:
 
 - 1 × **GL.iNet GL-SFT1200 "Opal"** as the network anchor. Joins
-  `entropy-5G` upstream over WiFi-as-WAN, rebroadcasts its own `noahnet`
+  `entropy-5G` upstream over WiFi-as-WAN, rebroadcasts its own `mockingbird`
   SSID on 2.4 GHz, and runs **Tailscale as a subnet router** advertising
-  `192.168.8.0/24` so the whole noahnet LAN is reachable from the tailnet.
+  `192.168.8.0/24` so the whole mockingbird LAN is reachable from the tailnet.
 - 1 × **Raspberry Pi Zero W** as the processing/storage backend. Joins
-  `noahnet` over WiFi. No on-device Tailscale — reaches the tailnet via
+  `mockingbird` over WiFi. No on-device Tailscale — reaches the tailnet via
   the Opal's subnet route.
 - 10 × **ESP32-WROOM-32** boards composed into leaves (sensors, actuators,
   controllers). A "leaf" is a logical role, not necessarily one board —
@@ -25,7 +25,7 @@ First planned capability: **distributed BLE sensing** (cluster of ESP32s
 scanning advertisements, Pi aggregating + de-duping + RSSI-fusing).
 More capabilities to follow.
 
-The repo started as `esp32-fw` (firmware-only) and was renamed to `noahnet`
+The repo started as `esp32-fw` (firmware-only) and was renamed to `mockingbird`
 when the scope expanded to include the Opal bridge and surrounding
 infrastructure. The original ESP32 firmware code is still in `main/` and
 remains the firmware story for *future* ESP32-S3 hardware — see "Why not
@@ -40,7 +40,7 @@ more ESP32 boards plus wires between them. Two patterns in use:
 One ESP32 time-slicing its single 2.4 GHz radio between WiFi STA (to the
 Opal) and BLE scanning. Optional ESP-NOW for peer-to-peer signaling with
 neighbors — peers must share a channel, which is automatic since all
-noahnet members associate to the same AP.
+mockingbird members associate to the same AP.
 
 - Trade-off: BLE scan duty cycle drops to ~30–70% when WiFi is busy.
 - Use when: node is comfortably in WiFi range, you want spatial diversity
@@ -49,7 +49,7 @@ noahnet members associate to the same AP.
 ### Paired specialist (BLE scanner + WiFi uplink)
 Two ESP32s wired together via UART (TX/RX/GND). One is BLE-only with
 WiFi disabled — ~100% BLE scan duty cycle. The other is WiFi-only,
-associated to `noahnet`, forwarding observations to the Pi over MQTT.
+associated to `mockingbird`, forwarding observations to the Pi over MQTT.
 UART at 1 Mbps is ~10× the bandwidth a BLE-observation stream needs.
 
 - Trade-off: 2× boards per logical node, 2× power, extra wiring.
@@ -80,10 +80,10 @@ case with less code and better BLE fidelity.
 - One unit already on WiFi at `192.168.0.172` (MAC `58:e6:c5:6f:4a:dc`) —
   appears to have been flashed from the `~/repos/esp32_demo` PlatformIO
   project (Arduino framework, custom servo code) before this project began.
-  Will move to `noahnet` SSID + 192.168.8.x once reflashed.
+  Will move to `mockingbird` SSID + 192.168.8.x once reflashed.
 
 ### GL.iNet GL-SFT1200 "Opal" travel router (WiFi AP + WAN bridge)
-Role: broadcasts the **Mockingbird** SSID (the noahnet LAN) on 2.4 GHz with
+Role: broadcasts the **Mockingbird** SSID (the mockingbird LAN) on 2.4 GHz with
 NAT, with WiFi-as-WAN upstream to `entropy-5G`. **Does NOT run Tailscale** —
 won't fit (see Gotchas). The Pi runs Tailscale instead and advertises the
 subnet for tailnet peers.
@@ -127,21 +127,21 @@ We originally planned to put Tailscale on the Opal. It doesn't fit:
 Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 
 - Model: **Raspberry Pi Zero W Rev 1.1** (BCM2835, single-core ARMv6 @ 1 GHz,
-  512 MB RAM, 2.4 GHz WiFi only — which is why `noahnet` is on 2.4 GHz)
+  512 MB RAM, 2.4 GHz WiFi only — which is why `mockingbird` is on 2.4 GHz)
 - **NOT** a Zero 2 W — confirmed via `cat /proc/cpuinfo`
 - OS: Raspberry Pi OS Lite **armhf** Bookworm `6.12.75-1+rpt1` (2026-03-11
   build, freshly flashed)
 - SD card: 64 GB (originally read-only because of a stuck write-protect on
   the SD adapter — **the lock switch is now super-glued to the unlocked
   position**, so reflashing always works now)
-- Hostname: `raspberrypi` on the LAN, `noahnet-pi` on the tailnet
+- Hostname: `raspberrypi` on the LAN, `mockingbird-pi` on the tailnet
 - LAN: `wlan0` on Mockingbird, `192.168.8.202/24` (DHCP — may renumber)
-- **Tailscale**: `noahnet-pi` at `100.83.26.55` (IPv4) /
+- **Tailscale**: `mockingbird-pi` at `100.83.26.55` (IPv4) /
   `fd7a:115c:a1e0::5838:1a37` (IPv6). Advertises `192.168.8.0/24`, route
   approved at the control plane. IP forwarding live
   (`net.ipv4.ip_forward=1`, persisted in `/etc/sysctl.d/99-tailscale.conf`).
 - Reach paths (preferred → fallback):
-  1. Tailscale (works from anywhere): `ssh pi@noahnet-pi`
+  1. Tailscale (works from anywhere): `ssh pi@mockingbird-pi`
   2. LAN: `ssh pi@192.168.8.202` (or whatever DHCP gave it)
   3. USB-gadget serial console (physical access required):
      `screen /dev/cu.usbmodem* 115200` — gadget is `dwc2,g_cdc`; macOS
@@ -153,7 +153,7 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 ### Noah's Mac (the dev box)
 - macOS Sequoia (Darwin 24.6.0), Apple Silicon
 - LAN: `192.168.0.241/24` on `en0` (WiFi)
-- Tailscale: installed and authenticated. Now sees `noahnet-pi` as a peer
+- Tailscale: installed and authenticated. Now sees `mockingbird-pi` as a peer
   with `192.168.8.0/24` subnet route. Mac is currently on Mockingbird so it
   reaches `192.168.8.x` directly via LAN, not through the tailnet route —
   the route is for OTHER tailnet peers (phone, Windows server, etc.).
@@ -169,7 +169,7 @@ All in `~/repos/.scratch/` (outside the repo, gitignored anyway):
 |---|---|
 | `pi-creds.txt` (0600) | Pi user `pi` + SHA-512 password hash + plaintext |
 | `wifi.txt` (0600) | `entropy` / WiFi PSK (used as upstream-WAN for Opal) |
-| `noahnet-wifi.txt` (0600) | `Mockingbird` SSID + auto-generated PSK (the noahnet LAN) |
+| `mockingbird-wifi.txt` (0600) | `Mockingbird` SSID + auto-generated PSK (the mockingbird LAN) |
 | `glinet-creds.txt` (0600) | Opal admin password |
 | `tailscale-authkey` (0600) | (empty/unused — we authed the Pi via interactive URL instead) |
 | `flash-pi.sh` | one-shot flasher for the Pi's SD card |
@@ -177,7 +177,7 @@ All in `~/repos/.scratch/` (outside the repo, gitignored anyway):
 | `sd-setup.sh` | SD card config-only edit script (legacy, kept for reference) |
 
 SSH key auth installed on both:
-- **Pi:** `ssh pi@noahnet-pi` (via tailnet) or `ssh pi@192.168.8.202` (LAN)
+- **Pi:** `ssh pi@mockingbird-pi` (via tailnet) or `ssh pi@192.168.8.202` (LAN)
 - **Opal:** `ssh glinet-new` (alias in `~/.ssh/config` → port 2222,
   ed25519 key). The `pi` user's sudo still needs a password — pull it from
   `~/repos/.scratch/pi-creds.txt` and `echo "$pw" | sudo -S ...` from scripts.
@@ -192,13 +192,13 @@ they exist.
        │                                                          │
        │   Noah's Mac (100.109.193.26), phone, Windows server,    │
        │   etc. — all reach 192.168.8.0/24 via the subnet route   │
-       │   advertised by noahnet-pi.                              │
+       │   advertised by mockingbird-pi.                              │
        │                          │                               │
        └──────────────────────────┼───────────────────────────────┘
                                   │ wireguard
                                   ▼
                   ┌───────────────────────────────┐
-                  │ Pi Zero W "noahnet-pi"        │
+                  │ Pi Zero W "mockingbird-pi"        │
                   │   tailnet: 100.83.26.55       │
                   │   LAN:     192.168.8.202      │
                   │   role:    subnet router      │
@@ -285,12 +285,12 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 
 ## Current state (as of last commit)
 
-- Repo: <https://github.com/noahjohnson0/noahnet> (private)
+- Repo: <https://github.com/noahjohnson0/mockingbird> (private)
 - **Opal:** powered up, admin pw set, SSH key auth working on port 2222
   (OpenSSH 8.0 installed via opkg, Dropbear left on 22 as fallback).
   Mockingbird SSID broadcasting, Repeater to `entropy-5G` up.
   **Not** running Tailscale — won't fit.
-- **Pi (noahnet-pi):** on Mockingbird at `192.168.8.202`, **Tailscale up
+- **Pi (mockingbird-pi):** on Mockingbird at `192.168.8.202`, **Tailscale up
   and advertising `192.168.8.0/24`** (route approved at the control plane).
   Tailnet IP `100.83.26.55`. IP forwarding live and persisted.
 - **Mac:** on Mockingbird at `192.168.8.134`, sees Pi as a direct
@@ -315,7 +315,7 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
    architecture (Opal = dumb AP, no Tailscale on it). Or write
    `scripts/bootstrap-pi-tailscale.sh` to reproduce the Pi setup.
 4. Move the existing ESP32 at `192.168.0.172` to Mockingbird (reflash with
-   noahnet firmware once it exists).
+   mockingbird firmware once it exists).
 4. Confirm reachability of the Pi from another tailnet peer via its
    new 192.168.8.x address
 5. Decide ESP32 firmware approach for the BLE sensing capability —
