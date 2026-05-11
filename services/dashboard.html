@@ -133,6 +133,41 @@
     padding: 10px; background: #14181f; border-radius: 4px;
     border-left: 2px solid #f59e0b;
   }
+  /* live pane: name editor */
+  .dev-row input.dev-name {
+    background: transparent; border: 0; color: #79c4ff;
+    font-family: inherit; font-size: 11px; padding: 1px 4px;
+    width: 100px; outline: none; border-bottom: 1px dashed #2a2e36;
+    border-radius: 0;
+  }
+  .dev-row input.dev-name::placeholder { color: #4b525c; font-style: italic; }
+  .dev-row input.dev-name:focus { border-bottom-color: #1d6fef; color: #79c4ff; }
+  .dev-row.named { background: #1a2230; border-color: #2a3a55; }
+  .dev-row.named .dev-mac { color: #6b7280; font-size: 10px; }
+  /* live-pane toolbar (toggles row) */
+  .live-toolbar {
+    display: flex; gap: 12px; align-items: center;
+    padding: 8px 10px; margin-bottom: 8px;
+    background: #14181f; border: 1px solid #232730; border-radius: 6px;
+    font-size: 11px; color: #cdd1d7;
+  }
+  .live-toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .live-toolbar input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 14px; height: 14px; border: 1px solid #2a2e36; border-radius: 3px;
+    background: #0c0d10; cursor: pointer; position: relative; flex-shrink: 0;
+  }
+  .live-toolbar input[type="checkbox"]:checked { background: #1d6fef; border-color: #1d6fef; }
+  .live-toolbar input[type="checkbox"]:checked::after {
+    content: '✓'; position: absolute; left: 1px; top: -3px;
+    color: white; font-size: 11px; font-weight: 700;
+  }
+  .live-toolbar .spacer { flex: 1; }
+  .live-toolbar button {
+    margin: 0; padding: 3px 8px; font-size: 10px;
+    background: transparent; color: #6b7280; border: 1px solid #2a2e36;
+  }
+  .live-toolbar button:hover { background: #1c1f24; color: #cdd1d7; }
   /* scene loading overlay — visible from first paint, fades out
      once Three.js has rendered its first frame and data has arrived */
   #scene-loader {
@@ -260,6 +295,15 @@
     <div class="live-count" id="live-count">·</div>
     <div class="live-count-label">devices<br>in view</div>
     <div class="live-asof" id="live-asof">—</div>
+  </div>
+
+  <div class="live-toolbar">
+    <label title="Show floating labels for every device. Off = only named devices show labels (clean view).">
+      <input type="checkbox" id="opt-show-all-labels">
+      Show all labels
+    </label>
+    <div class="spacer"></div>
+    <button id="opt-clear-names" title="Forget all device nicknames">clear names</button>
   </div>
 
   <h2>devices</h2>
@@ -514,6 +558,34 @@ function macColor(mac) {
   return new THREE.Color().setHSL(hue / 360, 0.7, 0.6);
 }
 
+// ---- device nickname store (localStorage) ----
+// Lets the user assign a short name like "phone" / "watch" / "airpods" to
+// a given MAC. Stored in localStorage so refreshes preserve them. Apple
+// MAC rotation means names age out every ~15 min — that's fine, the user
+// can just rename the new MAC when it appears.
+const NAMES_KEY = 'mockingbird.deviceNames';
+const SHOW_ALL_KEY = 'mockingbird.showAllLabels';
+let macNames = {};
+try { macNames = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}'); }
+catch { macNames = {}; }
+let showAllLabels = localStorage.getItem(SHOW_ALL_KEY) === 'true';
+
+function getName(mac) { return macNames[mac] || ''; }
+function setName(mac, name) {
+  name = (name || '').trim().slice(0, 24);
+  if (name) macNames[mac] = name;
+  else delete macNames[mac];
+  localStorage.setItem(NAMES_KEY, JSON.stringify(macNames));
+}
+function deviceLabelText(mac, rssi, nLeaves) {
+  const name = getName(mac);
+  if (name) return `${name} · ${rssi} dBm`;
+  return `${mac.slice(-8)} · ${rssi} dBm · ${nLeaves}L`;
+}
+function deviceLabelShouldShow(mac) {
+  return showAllLabels || !!getName(mac);
+}
+
 function ensureDeviceSphere(mac) {
   let entry = deviceByMac.get(mac);
   if (entry) return entry;
@@ -553,9 +625,38 @@ function applyLiveDevices(devices) {
     entry.target.set(d.x, d.z, d.y);
     entry.lastSeen = now;
     entry.rssi = d.rssi_max;
-    // label: shortened MAC + dBm
-    const shortMac = d.mac.slice(-8);
-    entry.labelEl.textContent = `${shortMac} · ${d.rssi_max} dBm · ${d.n_leaves}L`;
+    entry.nLeaves = d.n_leaves;
+    entry.labelEl.textContent = deviceLabelText(d.mac, d.rssi_max, d.n_leaves);
+    entry.labelEl.style.display = deviceLabelShouldShow(d.mac) ? '' : 'none';
+    // Brighter style for named devices so they stand out
+    if (getName(d.mac)) {
+      entry.labelEl.style.borderColor = '#1d6fef';
+      entry.labelEl.style.color = '#79c4ff';
+      entry.labelEl.style.fontWeight = '600';
+    } else {
+      entry.labelEl.style.borderColor = '#2a2e36';
+      entry.labelEl.style.color = '#e6e9ef';
+      entry.labelEl.style.fontWeight = '';
+    }
+  }
+}
+
+// Walk the existing device meshes and refresh label visibility + text.
+// Used when the user toggles "show all labels" or types a new name —
+// avoids waiting for the next poll to see the change.
+function refreshDeviceLabels() {
+  for (const [mac, e] of deviceByMac) {
+    e.labelEl.textContent = deviceLabelText(mac, e.rssi, e.nLeaves || 0);
+    e.labelEl.style.display = deviceLabelShouldShow(mac) ? '' : 'none';
+    if (getName(mac)) {
+      e.labelEl.style.borderColor = '#1d6fef';
+      e.labelEl.style.color = '#79c4ff';
+      e.labelEl.style.fontWeight = '600';
+    } else {
+      e.labelEl.style.borderColor = '#2a2e36';
+      e.labelEl.style.color = '#e6e9ef';
+      e.labelEl.style.fontWeight = '';
+    }
   }
 }
 
@@ -582,6 +683,18 @@ function tickDeviceAnimation() {
   }
 }
 
+// ---- leaves ----
+// Three.js uses Y-up. We map (x_room, y_room, z_room) → (x, z, y) in three:
+//   x_room   → three.x (right)
+//   y_room   → three.z (forward away from viewer)
+//   z_room   → three.y (up)
+// NOTE: these `const`s must initialize BEFORE loop() is invoked below,
+// otherwise tickLeafRotation hits the temporal dead zone on frame 1.
+const COLORS = [0x60a5fa, 0xa78bfa, 0xf472b6, 0x34d399, 0xfb923c, 0x22d3ee, 0xfbbf24, 0xf87171];
+const leafGroup = new THREE.Group();
+scene.add(leafGroup);
+const leavesByName = new Map();
+
 // Slowly rotate the leaf diamonds so their facets catch the light —
 // adds motion that distinguishes them from static spheres of any kind.
 function tickLeafRotation() {
@@ -606,17 +719,6 @@ function loop() {
 }
 setLoaderStage('compiling scene…');
 loop();
-
-// ---- leaves ----
-// Three.js uses Y-up. We map (x_room, y_room, z_room) → (x, z, y) in three:
-//   x_room   → three.x (right)
-//   y_room   → three.z (forward away from viewer)
-//   z_room   → three.y (up)
-const COLORS = [0x60a5fa, 0xa78bfa, 0xf472b6, 0x34d399, 0xfb923c, 0x22d3ee, 0xfbbf24, 0xf87171];
-
-const leafGroup = new THREE.Group();
-scene.add(leafGroup);
-const leavesByName = new Map();
 
 function ensureLeafMesh(leaf, idx) {
   let entry = leavesByName.get(leaf.leaf);
@@ -865,31 +967,79 @@ const liveAsofEl = document.getElementById('live-asof');
 const liveListEl = document.getElementById('live-list');
 
 let _liveFirstPollDone = false;
+const liveRowByMac = new Map();  // mac → row <div> in the sidebar
+
+function ensureLiveRow(d) {
+  let row = liveRowByMac.get(d.mac);
+  if (!row) {
+    const col = '#' + macColor(d.mac).getHexString();
+    const shortMac = d.mac.slice(-11);
+    const name = getName(d.mac);
+    row = document.createElement('div');
+    row.className = 'dev-row fadein' + (name ? ' named' : '');
+    row.dataset.mac = d.mac;
+    row.innerHTML = `
+      <span class="dev-dot" style="background:${col}"></span>
+      <input type="text" class="dev-name" placeholder="name…" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
+      <span class="dev-mac">${shortMac}</span>
+      <span class="dev-rssi"></span>
+      <span class="dev-n"></span>
+    `;
+    // Wire the name input ONCE, on row creation — never re-attached.
+    const inp = row.querySelector('input.dev-name');
+    inp.addEventListener('click', e => e.stopPropagation());
+    const save = debounce(() => {
+      const v = inp.value.trim();
+      setName(d.mac, v);
+      row.classList.toggle('named', !!v);
+      refreshDeviceLabels();
+    }, 350);
+    inp.addEventListener('input', save);
+    inp.addEventListener('blur', save);
+    liveListEl.appendChild(row);
+    liveRowByMac.set(d.mac, row);
+  }
+  // Update only the text fields — leave the name input alone so the user
+  // can keep typing across polls.
+  row.querySelector('.dev-rssi').textContent = `${d.rssi_max} dBm`;
+  row.querySelector('.dev-n').textContent = `${d.n_leaves}L`;
+  return row;
+}
+
 async function pollLive() {
   startFetch();
   try {
     const r = await fetch('/api/live').then(r => r.json());
     applyLiveDevices(r.devices || []);
-    liveCountEl.textContent = (r.devices || []).length;
+    const devs = r.devices || [];
+    liveCountEl.textContent = devs.length;
     const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
     liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
-    // sidebar list
-    const fade = _liveFirstPollDone ? '' : ' fadein';
-    if (!r.devices || r.devices.length === 0) {
-      const note = r.note ? `<div class="empty${fade}">${r.note}</div>`
-                          : `<div class="empty${fade}">no Apple devices currently seen by ≥2 positioned leaves</div>`;
-      liveListEl.innerHTML = note;
+    if (devs.length === 0) {
+      // Wipe rows + show empty note (no input to disturb).
+      for (const [mac, row] of liveRowByMac) { row.remove(); }
+      liveRowByMac.clear();
+      const note = r.note ? `<div class="empty">${r.note}</div>`
+                          : `<div class="empty">no Apple devices currently seen by ≥2 positioned leaves</div>`;
+      // Only set innerHTML if it's not already the empty message
+      if (!liveListEl.querySelector('.empty')) liveListEl.innerHTML = note;
     } else {
-      liveListEl.innerHTML = r.devices.map(d => {
-        const col = '#' + macColor(d.mac).getHexString();
-        const shortMac = d.mac.slice(-11);
-        return `<div class="dev-row${fade}">
-          <span class="dev-dot" style="background:${col}"></span>
-          <span class="dev-mac">${shortMac}</span>
-          <span class="dev-rssi">${d.rssi_max} dBm</span>
-          <span class="dev-n">${d.n_leaves}L</span>
-        </div>`;
-      }).join('');
+      // Strip any non-row content (like the empty-state note) on first device arrival
+      liveListEl.querySelectorAll(':scope > .empty, :scope > .live-loader').forEach(el => el.remove());
+      const seen = new Set(devs.map(d => d.mac));
+      // Upsert in server order so RSSI-strongest stays near the top.
+      let cursor = null;
+      for (const d of devs) {
+        const row = ensureLiveRow(d);
+        // Re-order: move row to current cursor position if not already there.
+        const nextSibling = cursor ? cursor.nextSibling : liveListEl.firstChild;
+        if (row !== nextSibling) liveListEl.insertBefore(row, nextSibling);
+        cursor = row;
+      }
+      // Drop any row not seen this poll.
+      for (const [mac, row] of liveRowByMac) {
+        if (!seen.has(mac)) { row.remove(); liveRowByMac.delete(mac); }
+      }
     }
     _liveFirstPollDone = true;
   } catch (e) {
@@ -910,6 +1060,7 @@ function setTab(name) {
     // First open: replace placeholder with a spinner immediately so the
     // tab feels alive while the first /api/live request is in flight.
     if (!_liveFirstPollDone) {
+      liveRowByMac.clear();
       liveListEl.innerHTML = `
         <div class="live-loader">
           <div class="spinner"></div>
@@ -925,6 +1076,30 @@ function setTab(name) {
 }
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => setTab(t.dataset.tab));
+});
+
+// ---- live-pane toolbar wiring ----
+const showAllEl = document.getElementById('opt-show-all-labels');
+showAllEl.checked = showAllLabels;
+showAllEl.addEventListener('change', () => {
+  showAllLabels = showAllEl.checked;
+  localStorage.setItem(SHOW_ALL_KEY, String(showAllLabels));
+  refreshDeviceLabels();
+  toast(showAllLabels ? 'showing all device labels' : 'showing only named devices');
+});
+document.getElementById('opt-clear-names').addEventListener('click', () => {
+  const n = Object.keys(macNames).length;
+  if (!n) return toast('no names to clear', 'warn');
+  if (!confirm(`clear ${n} device name${n === 1 ? '' : 's'}?`)) return;
+  macNames = {};
+  localStorage.setItem(NAMES_KEY, '{}');
+  // Clear sidebar inputs in place
+  liveListEl.querySelectorAll('input.dev-name').forEach(inp => {
+    inp.value = '';
+    inp.closest('.dev-row')?.classList.remove('named');
+  });
+  refreshDeviceLabels();
+  toast(`cleared ${n} name${n === 1 ? '' : 's'}`, 'warn');
 });
 </script>
 </body>
