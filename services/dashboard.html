@@ -448,7 +448,7 @@
   </div>
 
   <div class="live-toolbar">
-    <label title="Show floating labels next to every device sphere. Names are auto-assigned by MAC; you can override any via the sidebar inputs.">
+    <label title="Show floating labels next to every leaf diamond and device sphere in 3D. Names are auto-assigned per track; override via sidebar inputs.">
       <input type="checkbox" id="opt-show-all-labels">
       Show labels in 3D
     </label>
@@ -1095,6 +1095,11 @@ function refreshDeviceLabels() {
     if (e.lastDevice) e.labelEl.textContent = deviceLabelText(e.lastDevice, e.rssi);
     e.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
     styleLabelForKey(e.labelEl, tid);
+  }
+  // ALSO toggle leaf labels — the user expects "Show labels in 3D" to
+  // apply to everything in the scene, not just devices.
+  for (const [name, entry] of leavesByName) {
+    if (entry.labelEl) entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
   }
 }
 
