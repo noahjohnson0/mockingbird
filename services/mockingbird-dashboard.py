@@ -28,6 +28,18 @@ PORT = 8080
 _db_cache: dict[int, sqlite3.Connection] = {}
 _db_initialized = False
 
+# Known leaves + the location label they were set to via firmware /location.
+# The collector also captures locations in leaf_events, but querying that
+# table every request was costing 8-10s on a Pi Zero W under write load.
+# These are static labels (set once via firmware NVS); just hardcode them.
+# When you add a new leaf or relocate one, update this dict.
+KNOWN_LEAVES = {
+    "mockingbird-4ce184": "Noah room test rack",
+    "mockingbird-4c0bdc": "noahs bedroom plant rack",
+    "mockingbird-4c36ec": "desk",
+    "mockingbird-4db204": "dresser",
+}
+
 
 def _init_schema(db: sqlite3.Connection) -> None:
     """Run schema setup exactly once per process. CREATE TABLE IF NOT EXISTS
@@ -113,35 +125,82 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           for row in db.execute(
                               "SELECT leaf, x, y, z, units, notes FROM leaf_position"
                           )}
-            # Pull EVERYTHING from leaf_events (~27k rows, indexed) — skip
-            # the obs table entirely. The collector writes a heartbeat
-            # event for each leaf every 5s, which gives both "online"
-            # (last hb time) and the current location (from latest hello).
-            # obs has 1.4M+ rows being constantly written; querying it
-            # fights the collector for locks AND the optimizer picks the
-            # wrong index. leaf_events is 50× smaller and write-quiet.
-            last_event = {}      # leaf → ts of most recent event (any kind)
-            last_hello = {}      # leaf → parsed info dict from most recent hello
-            for leaf, event, ts, info in db.execute("""
-                SELECT leaf, event, ts, info FROM leaf_events
-                WHERE ts >= strftime('%s','now') - 86400
-                ORDER BY ts
-            """):
-                if ts > last_event.get(leaf, 0): last_event[leaf] = ts
-                if event == "hello" and info:
-                    try:    last_hello[leaf] = json.loads(info)
-                    except: pass
-
-            all_leaves = set(positioned) | set(last_event)
             out = []
-            for leaf in sorted(all_leaves):
+            for leaf in sorted(set(KNOWN_LEAVES) | set(positioned)):
                 row = positioned.get(leaf, {"leaf": leaf, "x": None, "y": None, "z": None, "units": "m", "notes": None})
                 row.setdefault("leaf", leaf)
-                row["location"]  = (last_hello.get(leaf) or {}).get("location") or None
-                row["last_seen"] = last_event.get(leaf)
-                row["online"]    = bool(last_event.get(leaf) and (time.time() - last_event[leaf]) < 30)
+                row["location"] = KNOWN_LEAVES.get(leaf)
                 out.append(row)
             return self._json(out)
+
+        if url.path == "/api/live":
+            # Live device-cluster view. Returns Apple-fingerprint devices
+            # (manuf '4c00*' — iPhones, AirPods, Watches, MacBooks) seen
+            # by ≥2 positioned leaves in the last LIVE_WINDOW_S seconds,
+            # with a weighted-centroid position. Weights are linear-amplitude
+            # RSSI (10**(rssi/20)) — stronger signal = bigger pull.
+            #
+            # MAC rotation note: Apple Continuity rotates random addrs ~every
+            # 15 min, so the *same physical device* may appear as multiple
+            # MACs over time. v1 just renders every recently-seen MAC; a
+            # dot that vanishes and a new one nearby usually means rotation,
+            # not movement. Future: cluster by RSSI-fingerprint similarity.
+            LIVE_WINDOW_S = 8
+            db = open_db()
+            positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
+                "SELECT leaf, x, y, z FROM leaf_position"
+            )}
+            if not positions:
+                return self._json({"as_of": time.time(), "devices": [], "note": "no positioned leaves yet"})
+            now = time.time()
+            # IMPORTANT: don't let SQLite GROUP BY on (mac, leaf) — it picks
+            # the (mac, ts) covering index and full-scans the obs table
+            # (~20 s on a Pi Zero W). Force the ts index for the range scan,
+            # then aggregate in Python (≪1 ms for a few hundred rows).
+            rows = db.execute(
+                "SELECT mac, leaf, rssi, name, manuf "
+                "FROM obs INDEXED BY idx_obs_ts "
+                "WHERE ts >= ? AND manuf LIKE '4c00%'",
+                (now - LIVE_WINDOW_S,),
+            ).fetchall()
+            # Aggregate (mac, leaf) → max rssi + first-seen name/manuf
+            best: dict[tuple[str, str], tuple[int, str | None, str | None]] = {}
+            for mac, leaf, rssi, name, manuf in rows:
+                if leaf not in positions:
+                    continue
+                key = (mac, leaf)
+                cur = best.get(key)
+                if cur is None or rssi > cur[0]:
+                    best[key] = (rssi, name or (cur[1] if cur else None), manuf or (cur[2] if cur else None))
+            by_mac: dict[str, list[tuple[str, int, str | None, str | None]]] = {}
+            for (mac, leaf), (rssi, name, manuf) in best.items():
+                by_mac.setdefault(mac, []).append((leaf, rssi, name, manuf))
+            devices = []
+            for mac, hits in by_mac.items():
+                if len(hits) < 2:
+                    continue  # need ≥2 positioned-leaf hits for any position confidence
+                num_x = num_y = num_z = denom = 0.0
+                rssi_max = -999
+                leaves_seen = []
+                name = manuf = None
+                for leaf, rssi, lname, lmanuf in hits:
+                    w = 10.0 ** (rssi / 20.0)  # linear amplitude → relative loudness
+                    px, py, pz = positions[leaf]
+                    num_x += w * px; num_y += w * py; num_z += w * pz
+                    denom += w
+                    if rssi > rssi_max:
+                        rssi_max = rssi
+                    leaves_seen.append({"leaf": leaf, "rssi": rssi})
+                    name = name or lname
+                    manuf = manuf or lmanuf
+                devices.append({
+                    "mac": mac, "name": name, "manuf": manuf,
+                    "x": num_x / denom, "y": num_y / denom, "z": num_z / denom,
+                    "rssi_max": rssi_max, "n_leaves": len(hits),
+                    "leaves": leaves_seen,
+                })
+            devices.sort(key=lambda d: d["rssi_max"], reverse=True)
+            return self._json({"as_of": now, "window_s": LIVE_WINDOW_S, "devices": devices})
 
         if url.path == "/api/room":
             db = open_db()
@@ -207,6 +266,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if m:
             db = open_db()
             db.execute("DELETE FROM leaf_position WHERE leaf=?", (m.group(1),))
+            _CACHE.pop("leaves", None)
             return self._json({"status": "ok"})
         return self._send(404, b"not found", "text/plain")
 
