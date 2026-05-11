@@ -68,6 +68,10 @@
       <input type="number" step="0.01" id="room-d" placeholder="depth">
       <input type="number" step="0.01" id="room-h" placeholder="height">
     </div>
+    <div class="leaf-status" style="margin-top:8px">
+      north (°clockwise from +y / room "depth" axis)
+    </div>
+    <input type="number" step="1" id="room-north" placeholder="0" style="margin-top:4px; width:80px">
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
     <button id="room-save">save</button>
   </div>
@@ -132,6 +136,50 @@ scene.add(axes);
 const roomGroup = new THREE.Group();
 scene.add(roomGroup);
 let roomDims = null;  // {W, D, H}
+
+// ---- north arrow (independent of room dims so it survives rebuilds) ----
+const northGroup = new THREE.Group();
+scene.add(northGroup);
+{
+  // Red arrow pointing along +z (which is +y_room before rotation).
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.015, 0.015, 0.7, 12),
+    new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0x5a0e0e })
+  );
+  shaft.position.set(0, 0.35, 0); shaft.rotation.x = Math.PI / 2;
+  shaft.position.z = 0.35; shaft.position.y = 0.04;
+  // Re-orient: shaft along +z
+  shaft.rotation.set(Math.PI / 2, 0, 0);
+  shaft.position.set(0, 0.04, 0.35);
+  northGroup.add(shaft);
+
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.06, 0.18, 16),
+    new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0x5a0e0e })
+  );
+  head.rotation.x = Math.PI / 2;
+  head.position.set(0, 0.04, 0.78);
+  northGroup.add(head);
+
+  // "N" label
+  const nEl = document.createElement('div');
+  nEl.style.cssText = `
+    color: #ef4444; font-weight: 700; font-size: 13px;
+    background: rgba(20,22,26,0.85); padding: 1px 6px;
+    border-radius: 3px; border: 1px solid #4b1414;
+  `;
+  nEl.textContent = 'N';
+  const nLabel = new CSS2DObject(nEl);
+  nLabel.position.set(0, 0.04, 0.95);
+  northGroup.add(nLabel);
+}
+
+function setNorthRotation(deg) {
+  // deg = clockwise from +y_room axis (which is three +z). Three.js
+  // rotation around +y is right-handed (CCW looking down). So clockwise-
+  // from-+y in the user's mental model = negative Y rotation in three.
+  northGroup.rotation.y = -deg * Math.PI / 180;
+}
 
 function rebuildRoom(w, d, h) {
   while (roomGroup.children.length) roomGroup.remove(roomGroup.children[0]);
@@ -317,22 +365,23 @@ async function refreshRoom() {
   try {
     const r = await fetch('/api/room').then(r => r.json());
     if (r.width && r.depth && r.height) {
-      // Only rebuild if dimensions changed (avoid flicker)
       const next = `${r.width}|${r.depth}|${r.height}`;
       if (!roomDims || roomDims.key !== next) {
         roomDims = { key: next, W: r.width, D: r.depth, H: r.height };
         rebuildRoom(r.width, r.depth, r.height);
       }
     }
-    // Always sync the form fields if they're not focused
+    setNorthRotation(r.north_deg || 0);
     const wEl = document.getElementById('room-w');
     const dEl = document.getElementById('room-d');
     const hEl = document.getElementById('room-h');
     const nEl = document.getElementById('room-notes');
+    const northEl = document.getElementById('room-north');
     if (document.activeElement !== wEl) wEl.value = r.width ?? '';
     if (document.activeElement !== dEl) dEl.value = r.depth ?? '';
     if (document.activeElement !== hEl) hEl.value = r.height ?? '';
     if (document.activeElement !== nEl) nEl.value = r.notes ?? '';
+    if (document.activeElement !== northEl) northEl.value = r.north_deg ?? 0;
   } catch (e) { console.error(e); }
 }
 
@@ -340,11 +389,12 @@ document.getElementById('room-save').addEventListener('click', async () => {
   const w = parseFloat(document.getElementById('room-w').value);
   const d = parseFloat(document.getElementById('room-d').value);
   const h = parseFloat(document.getElementById('room-h').value);
+  const north_deg = parseFloat(document.getElementById('room-north').value) || 0;
   const notes = document.getElementById('room-notes').value;
   if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return alert('W/D/H must be positive numbers');
   const r = await fetch('/api/room', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ width: w, depth: d, height: h, notes }),
+    body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
   });
   if (r.ok) refreshRoom();
   else alert(await r.text());
