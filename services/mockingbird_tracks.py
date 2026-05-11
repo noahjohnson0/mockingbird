@@ -46,6 +46,18 @@ EWMA_ALPHA = 0.35                # RSSI fingerprint smoothing per update
 TRAIL_HISTORY_LEN = 80           # ~40 s at 500 ms poll cadence
 MIN_TRAIL_DELTA_S = 0.4          # don't append a trail point more often than this
 
+# ---- entity (multi-track-per-person) clustering tunables ----
+# Two tracks are clustered into the same "entity" (= same physical
+# person/object carrying multiple BLE radios) when their RSSI fingerprints
+# match closely. The threshold is tight because we want to merge SAME-
+# device-multi-protocol broadcasts (which are essentially identical RSSI
+# signatures since they share an antenna) without merging two distinct
+# devices that just happen to be near each other.
+ENTITY_RMS_THRESHOLD = 3.5      # dB; tighter than rotation-matching's 6 dB
+ENTITY_MIN_SHARED_LEAVES = 3    # need ≥3 leaves both tracks see in-room
+ENTITY_MIN_LIFETIME_S = 6       # both tracks alive at least this long
+
+
 # ---- position smoothing ----
 # Per-track EWMA on the raw position estimate. RSSI jitter of ±5–10 dB
 # at n≈2.0 produces 3× distance error per single sample, so without
@@ -102,6 +114,12 @@ def codename_for(track_id: str) -> str:
     # Suffix: last 2 chars of the track_id (deterministic, human-readable)
     suffix = track_id[-2:] if len(track_id) >= 2 else "00"
     return f"{a} {b}·{suffix}"
+
+
+def codename_for_entity(entity_id: str) -> str:
+    """Same scheme as codename_for() but applied to entities. Stable
+    across MAC + track rotations because entity_id is the persistent ID."""
+    return codename_for("entity:" + entity_id)
 
 
 @dataclass
@@ -178,18 +196,124 @@ def _rssi_rms_delta(a: dict[str, float], b: dict[str, int]) -> tuple[float, int]
     return (math.sqrt(sq / n), n)
 
 
+@dataclass
+class Entity:
+    """A persistent identity that owns multiple tracks. Maps to a physical
+    person or object carrying several BLE-broadcasting devices (phone,
+    watch, AirPods, MacBook, ...) all at the same location.
+    Survives MAC rotation AND track rotation."""
+    entity_id: str
+    first_seen: float
+    last_seen: float
+    track_ids: list[str] = field(default_factory=list)
+    # Cached aggregate fingerprint (max RSSI per leaf across member tracks)
+    fingerprint: dict[str, float] = field(default_factory=dict)
+    last_position: tuple[float, float, float] | None = None
+
+    @property
+    def name(self) -> str:
+        return codename_for_entity(self.entity_id)
+
+
 class TrackStore:
-    """In-process registry of active tracks. Singleton in the dashboard
-    process. Thread-safety: only one HTTP handler runs at a time in our
-    ThreadingHTTPServer-with-per-request-cache setup, but we still guard
-    mutations behind a coarse lock since /api/live calls can interleave
-    with /api/leaves estimate calls."""
+    """In-process registry of active tracks + their entity clustering.
+    Singleton in the dashboard process. Thread-safety: only one HTTP
+    handler runs at a time in our ThreadingHTTPServer-with-per-request-
+    cache setup, but we still guard mutations behind a coarse lock since
+    /api/live calls can interleave with /api/leaves estimate calls."""
 
     def __init__(self) -> None:
         self.tracks: dict[str, Track] = {}
         self.mac_to_track: dict[str, str] = {}
+        # Entity clustering: stable IDs for the lifetime of the process,
+        # rebuilt from fingerprint similarity each step but with sticky
+        # IDs (if track A was in entity E last step, it stays unless the
+        # cluster splits).
+        self.entities: dict[str, Entity] = {}
+        self.track_to_entity: dict[str, str] = {}
         import threading
         self._lock = threading.Lock()
+
+    def _cluster_entities(self, now: float) -> None:
+        """Recompute entity assignments from current track fingerprints.
+
+        Algorithm: union-find over pairs of tracks whose RSSI fingerprints
+        match within ENTITY_RMS_THRESHOLD on ≥ENTITY_MIN_SHARED_LEAVES
+        shared in-room leaves. Tracks must have lived ≥ENTITY_MIN_LIFETIME_S
+        each so the fingerprint is settled. Sticky IDs: if a track was in
+        an entity last step and that entity still has any members, the
+        track stays in that entity.
+        """
+        # 1. Active tracks (recent + settled fingerprint)
+        active = [
+            t for t in self.tracks.values()
+            if now - t.first_seen >= ENTITY_MIN_LIFETIME_S
+            and now - t.last_seen < 30
+        ]
+        if not active:
+            self.entities = {}
+            self.track_to_entity = {}
+            return
+
+        # 2. Pairwise RMS comparison → adjacency for union-find
+        parent: dict[str, str] = {t.track_id: t.track_id for t in active}
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+        for i, a in enumerate(active):
+            for b in active[i + 1:]:
+                rms, n = _rssi_rms_delta(a.fingerprint, b.fingerprint)
+                if n < ENTITY_MIN_SHARED_LEAVES:
+                    continue
+                if rms <= ENTITY_RMS_THRESHOLD:
+                    union(a.track_id, b.track_id)
+
+        # 3. Bucket tracks by union-find root → tentative clusters
+        clusters: dict[str, list[str]] = {}
+        for t in active:
+            r = find(t.track_id)
+            clusters.setdefault(r, []).append(t.track_id)
+
+        # 4. Sticky-ID assignment: reuse existing entity_id where possible.
+        # For each cluster, look at which entity_ids its members were in.
+        # Pick the most popular (or oldest) existing entity_id. If none,
+        # mint a new one.
+        new_entities: dict[str, Entity] = {}
+        new_t2e: dict[str, str] = {}
+        for root, tids in clusters.items():
+            existing_ids = [self.track_to_entity.get(t) for t in tids]
+            existing_ids = [e for e in existing_ids if e and e in self.entities]
+            if existing_ids:
+                # Take the entity_id with most members in this cluster
+                from collections import Counter
+                eid = Counter(existing_ids).most_common(1)[0][0]
+                first_seen = self.entities[eid].first_seen
+            else:
+                eid = uuid.uuid4().hex[:12]
+                first_seen = now
+            # Build aggregate fingerprint: max RSSI per leaf across members
+            agg_fp: dict[str, float] = {}
+            last_pos: tuple[float, float, float] | None = None
+            for tid in tids:
+                t = self.tracks[tid]
+                for leaf, rssi in t.fingerprint.items():
+                    if leaf not in agg_fp or rssi > agg_fp[leaf]:
+                        agg_fp[leaf] = rssi
+                if t.last_position is not None:
+                    last_pos = t.last_position
+                new_t2e[tid] = eid
+            new_entities[eid] = Entity(
+                entity_id=eid, first_seen=first_seen, last_seen=now,
+                track_ids=tids, fingerprint=agg_fp, last_position=last_pos,
+            )
+        self.entities = new_entities
+        self.track_to_entity = new_t2e
 
     def step(self, devices: Iterable[dict], now: float | None = None,
              calibration=None, positions: dict | None = None,
@@ -273,6 +397,22 @@ class TrackStore:
                     "pos_method": pos_method,
                 }
                 out.append(enriched)
+            # ---- entity clustering pass ----
+            # All tracks now updated; cluster them by RSSI fingerprint
+            # similarity → entities. Sticky IDs across calls.
+            self._cluster_entities(now)
+            # Decorate the output with entity_id and entity_name
+            for row in out:
+                eid = self.track_to_entity.get(row["track_id"])
+                if eid and eid in self.entities:
+                    e = self.entities[eid]
+                    row["entity_id"] = eid
+                    row["entity_name"] = e.name
+                    row["entity_size"] = len(e.track_ids)
+                else:
+                    row["entity_id"] = None
+                    row["entity_name"] = None
+                    row["entity_size"] = 1
         return out
 
     def _best_match(self, rssi_vec: dict[str, int], claimed: set[str], now: float) -> Track | None:
