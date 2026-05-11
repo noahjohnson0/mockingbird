@@ -38,7 +38,170 @@ KNOWN_LEAVES = {
     "mockingbird-4c0bdc": "noahs bedroom plant rack",
     "mockingbird-4c36ec": "desk",
     "mockingbird-4db204": "dresser",
+    # Newly added 2026-05-11 — placement pending.
+    "mockingbird-4ceb7c": None,
+    "mockingbird-4d4384": None,
 }
+
+# Cache of "leaves seen streaming recently" so /api/leaves stays cheap.
+# A leaf is "online" if it produced any obs row in the last ACTIVE_WINDOW_S.
+# Cached for ACTIVE_CACHE_TTL because the query is a single distinct-scan
+# over ~few hundred rows and we don't want to redo it on every page poll.
+ACTIVE_WINDOW_S = 60
+ACTIVE_CACHE_TTL = 8
+_active_cache: dict = {"ts": 0.0, "leaves": set()}
+
+def active_leaves(db: sqlite3.Connection) -> set[str]:
+    global _active_cache
+    now = time.time()
+    if now - _active_cache["ts"] < ACTIVE_CACHE_TTL:
+        return _active_cache["leaves"]
+    rows = db.execute(
+        "SELECT DISTINCT leaf FROM obs INDEXED BY idx_obs_ts WHERE ts >= ?",
+        (now - ACTIVE_WINDOW_S,),
+    ).fetchall()
+    leaves = {row[0] for row in rows}
+    _active_cache = {"ts": now, "leaves": leaves}
+    return leaves
+
+
+# Per-leaf RSSI statistics (count of distinct devices, top RSSI, median).
+# Single range scan over a short window; cached for cheap reuse.
+STATS_WINDOW_S = 20
+STATS_CACHE_TTL = 4.0
+_stats_cache: dict = {"ts": 0.0, "data": {}}
+
+def leaf_rssi_stats(db: sqlite3.Connection, active: set[str]) -> dict[str, dict]:
+    """For each active leaf, return {n_devices, top_rssi, median_rssi}.
+
+    'n_devices' is the count of distinct MACs seen in the last
+    STATS_WINDOW_S seconds; top/median are computed on each MAC's MAX(rssi)
+    on that leaf in the window. Same range-scan trick as /api/live.
+    """
+    global _stats_cache
+    now = time.time()
+    if now - _stats_cache["ts"] < STATS_CACHE_TTL:
+        return _stats_cache["data"]
+    rows = db.execute(
+        "SELECT leaf, mac, rssi FROM obs INDEXED BY idx_obs_ts "
+        "WHERE ts >= ?",
+        (now - STATS_WINDOW_S,),
+    ).fetchall()
+    # Aggregate (leaf, mac) → max rssi in Python (cheap for ≲2k rows)
+    best: dict[tuple[str, str], int] = {}
+    for leaf, mac, rssi in rows:
+        cur = best.get((leaf, mac))
+        if cur is None or rssi > cur:
+            best[(leaf, mac)] = rssi
+    # Pivot to per-leaf lists
+    per_leaf: dict[str, list[int]] = {}
+    for (leaf, _mac), r in best.items():
+        per_leaf.setdefault(leaf, []).append(r)
+    out: dict[str, dict] = {}
+    for leaf, rssis in per_leaf.items():
+        if leaf not in active:
+            continue
+        rssis.sort(reverse=True)
+        n = len(rssis)
+        out[leaf] = {
+            "n_devices": n,
+            "top_rssi": rssis[0],
+            "median_rssi": rssis[n // 2],
+        }
+    _stats_cache = {"ts": now, "data": out}
+    return out
+
+
+# Per-leaf position estimate cache (estimate is steady-state; recompute
+# every ESTIMATE_TTL only). Recomputed live so as the user keeps moving
+# the leaf around, the estimate follows within ~10s.
+ESTIMATE_TTL = 10.0
+ESTIMATE_WINDOW_S = 30
+ESTIMATE_MIN_DEVICES = 4  # below this, the centroid is too noisy to publish
+_estimate_cache: dict[str, dict] = {}
+
+
+def estimate_leaf_position(db: sqlite3.Connection, leaf_id: str,
+                           positions: dict[str, tuple[float, float, float]]) -> dict | None:
+    """Estimate (x,y,z) for an unpositioned leaf from its observed RSSI
+    to devices that are also seen by ≥2 positioned leaves.
+
+    For each such device:
+      - compute its centroid via weighted RSSI across positioned leaves
+      - weight that centroid by 10**(rssi_target/20) where rssi_target is
+        how loud the device is to the unknown leaf
+    Sum / normalize → leaf position estimate.
+    """
+    cached = _estimate_cache.get(leaf_id)
+    now = time.time()
+    if cached and now - cached["ts"] < ESTIMATE_TTL:
+        return cached["estimate"]
+
+    # 1. Devices this leaf sees recently
+    target_rows = db.execute(
+        "SELECT mac, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+        "WHERE ts >= ? AND leaf = ? GROUP BY mac",
+        (now - ESTIMATE_WINDOW_S, leaf_id),
+    ).fetchall()
+    if not target_rows:
+        _estimate_cache[leaf_id] = {"ts": now, "estimate": None}
+        return None
+    target_rssi = {mac: rssi for mac, rssi in target_rows}
+
+    # 2. RSSI of those same MACs to each positioned leaf (in one query)
+    if not positions or not target_rssi:
+        _estimate_cache[leaf_id] = {"ts": now, "estimate": None}
+        return None
+    macs = list(target_rssi.keys())
+    # SQLite max parameter count is 999; we chunk in case there are many.
+    BATCH = 500
+    pos_rows: list[tuple[str, str, int]] = []
+    pos_leaves = list(positions.keys())
+    for i in range(0, len(macs), BATCH):
+        chunk = macs[i:i + BATCH]
+        ph_macs = ",".join("?" * len(chunk))
+        ph_leaves = ",".join("?" * len(pos_leaves))
+        pos_rows.extend(db.execute(
+            f"SELECT mac, leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+            f"WHERE ts >= ? AND mac IN ({ph_macs}) AND leaf IN ({ph_leaves}) "
+            f"GROUP BY mac, leaf",
+            (now - ESTIMATE_WINDOW_S, *chunk, *pos_leaves),
+        ).fetchall())
+
+    by_mac: dict[str, list[tuple[str, int]]] = {}
+    for mac, leaf, rssi in pos_rows:
+        by_mac.setdefault(mac, []).append((leaf, rssi))
+
+    # 3. Weighted-centroid over devices that have ≥2 positioned-leaf hits
+    num_x = num_y = num_z = denom = 0.0
+    n_devices = 0
+    for mac, hits in by_mac.items():
+        if len(hits) < 2:
+            continue
+        # Device centroid from positioned leaves (same math as /api/live)
+        dnx = dny = dnz = dd = 0.0
+        for leaf, rssi in hits:
+            w = 10.0 ** (rssi / 20.0)
+            px, py, pz = positions[leaf]
+            dnx += w * px; dny += w * py; dnz += w * pz; dd += w
+        dev_x, dev_y, dev_z = dnx / dd, dny / dd, dnz / dd
+        # Weight this device by how loud it is to the unknown leaf
+        wt = 10.0 ** (target_rssi[mac] / 20.0)
+        num_x += wt * dev_x; num_y += wt * dev_y; num_z += wt * dev_z
+        denom += wt
+        n_devices += 1
+
+    if n_devices < ESTIMATE_MIN_DEVICES or denom == 0:
+        _estimate_cache[leaf_id] = {"ts": now, "estimate": None}
+        return None
+    est = {
+        "x": round(num_x / denom, 2),
+        "y": round(num_y / denom, 2),
+        "z": round(num_z / denom, 2),
+        "n_devices": n_devices,
+    }
+    _estimate_cache[leaf_id] = {"ts": now, "estimate": est}
+    return est
 
 
 def _init_schema(db: sqlite3.Connection) -> None:
@@ -125,11 +288,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           for row in db.execute(
                               "SELECT leaf, x, y, z, units, notes FROM leaf_position"
                           )}
+            # Union: hardcoded known + currently-streaming + positioned.
+            # Currently-streaming surfaces newly-plugged-in leaves with
+            # zero config — they appear in the sidebar automatically.
+            active = active_leaves(db)
+            all_leaves = set(KNOWN_LEAVES) | set(positioned) | active
+            # Positions tuple for use in estimation
+            pos_tuples = {l: (positioned[l]["x"], positioned[l]["y"], positioned[l]["z"])
+                          for l in positioned}
+            # Per-leaf RSSI stats (active leaves only, cached cheaply)
+            stats = leaf_rssi_stats(db, active)
             out = []
-            for leaf in sorted(set(KNOWN_LEAVES) | set(positioned)):
+            for leaf in sorted(all_leaves):
                 row = positioned.get(leaf, {"leaf": leaf, "x": None, "y": None, "z": None, "units": "m", "notes": None})
                 row.setdefault("leaf", leaf)
                 row["location"] = KNOWN_LEAVES.get(leaf)
+                row["online"] = leaf in active
+                row["stats"] = stats.get(leaf)  # {n_devices, top_rssi, median_rssi} or None
+                # Estimated position for unpositioned + active leaves.
+                if leaf in active and row["x"] is None and len(pos_tuples) >= 2:
+                    row["estimate"] = estimate_leaf_position(db, leaf, pos_tuples)
+                else:
+                    row["estimate"] = None
                 out.append(row)
             return self._json(out)
 
