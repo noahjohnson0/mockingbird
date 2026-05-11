@@ -46,6 +46,30 @@ EWMA_ALPHA = 0.35                # RSSI fingerprint smoothing per update
 TRAIL_HISTORY_LEN = 80           # ~40 s at 500 ms poll cadence
 MIN_TRAIL_DELTA_S = 0.4          # don't append a trail point more often than this
 
+# ---- position smoothing ----
+# Per-track EWMA on the raw position estimate. RSSI jitter of ±5–10 dB
+# at n≈2.0 produces 3× distance error per single sample, so without
+# smoothing a stationary device appears to dance around by 1–2 m. We
+# adapt α based on jump distance so the filter is "soft" for small
+# motion (trusts new samples) but "hard" for big jumps (treats them as
+# probable noise, gives them tiny weight). Net effect: stationary
+# devices stay rock-still, real motion still tracks.
+SMOOTH_ALPHA_MIN  = 0.08         # for big jumps — heavy filter
+SMOOTH_ALPHA_MAX  = 0.45         # for tiny jumps — barely filter at all
+SMOOTH_JUMP_SOFT  = 0.40         # m, below = ~max α (full trust)
+SMOOTH_JUMP_HARD  = 2.00         # m, above = ~min α (very suspicious)
+
+
+def _smooth_alpha(jump_m: float) -> float:
+    """Map jump magnitude to a smoothing weight α ∈ [MIN, MAX]."""
+    if jump_m <= SMOOTH_JUMP_SOFT:
+        return SMOOTH_ALPHA_MAX
+    if jump_m >= SMOOTH_JUMP_HARD:
+        return SMOOTH_ALPHA_MIN
+    # Linear interp between SOFT (full trust) and HARD (high suspicion)
+    t = (jump_m - SMOOTH_JUMP_SOFT) / (SMOOTH_JUMP_HARD - SMOOTH_JUMP_SOFT)
+    return SMOOTH_ALPHA_MAX - t * (SMOOTH_ALPHA_MAX - SMOOTH_ALPHA_MIN)
+
 # ---- name pool, same scheme as the client-side codenames ----
 ADJECTIVES = (
     "ruby", "jade", "ash", "copper", "slate", "dusk", "dawn", "amber",
@@ -97,7 +121,8 @@ class Track:
     mac_history: list[str] = field(default_factory=list)   # ordered, most recent last
     fingerprint: dict[str, float] = field(default_factory=dict)  # leaf → ewma rssi
     trail: deque[TrailPoint] = field(default_factory=lambda: deque(maxlen=TRAIL_HISTORY_LEN))
-    last_position: tuple[float, float, float] | None = None
+    last_position: tuple[float, float, float] | None = None   # smoothed
+    raw_position: tuple[float, float, float] | None = None    # latest unsmoothed
     last_trail_ts: float = 0.0
 
     @property
@@ -108,13 +133,11 @@ class Track:
         if mac != self.current_mac:
             if self.current_mac and self.current_mac != mac:
                 self.mac_history.append(self.current_mac)
-                # Keep mac_history bounded — we only really need to know
-                # the last few rotations for diagnostic purposes
                 if len(self.mac_history) > 8:
                     self.mac_history = self.mac_history[-8:]
             self.current_mac = mac
         self.last_seen = now
-        # EWMA-update fingerprint with this latest observation
+        # EWMA-update fingerprint
         for leaf, rssi in rssi_vec.items():
             prev = self.fingerprint.get(leaf)
             self.fingerprint[leaf] = (
@@ -122,9 +145,24 @@ class Track:
                 else (1 - EWMA_ALPHA) * prev + EWMA_ALPHA * rssi
             )
         if pos is not None:
-            self.last_position = pos
+            self.raw_position = pos
+            # Adaptive EWMA on position: small jumps (≤ 0.4m) trusted
+            # heavily, big jumps (≥ 2m) treated as probable noise.
+            if self.last_position is None:
+                self.last_position = pos
+            else:
+                lx, ly, lz = self.last_position
+                jump = math.sqrt((pos[0]-lx)**2 + (pos[1]-ly)**2 + (pos[2]-lz)**2)
+                a = _smooth_alpha(jump)
+                self.last_position = (
+                    a * pos[0] + (1 - a) * lx,
+                    a * pos[1] + (1 - a) * ly,
+                    a * pos[2] + (1 - a) * lz,
+                )
+            # Use smoothed position for the trail too — trails read as
+            # smooth motion instead of noisy zigzags.
             if now - self.last_trail_ts >= MIN_TRAIL_DELTA_S:
-                self.trail.append(TrailPoint(now, *pos))
+                self.trail.append(TrailPoint(now, *self.last_position))
                 self.last_trail_ts = now
 
 
@@ -153,10 +191,16 @@ class TrackStore:
         import threading
         self._lock = threading.Lock()
 
-    def step(self, devices: Iterable[dict], now: float | None = None) -> list[dict]:
+    def step(self, devices: Iterable[dict], now: float | None = None,
+             calibration=None, positions: dict | None = None,
+             multilat_bounds: tuple | None = None) -> list[dict]:
         """Assign every input device to a track (existing or new); return
-        an enriched list with track metadata. devices is the list shape
-        produced by /api/live: each item has mac, x, y, z, leaves [{leaf, rssi}].
+        an enriched list with track metadata.
+
+        If calibration + positions are given, also re-positions each
+        device using *the track's accumulated RSSI fingerprint* (which
+        has more leaf coverage than any single short-lived MAC) instead
+        of the per-MAC fingerprint. Returns smoothed positions.
         """
         if now is None:
             now = time.time()
@@ -170,6 +214,9 @@ class TrackStore:
             for d in devices:
                 mac: str = d["mac"]
                 rssi_vec = {hit["leaf"]: hit["rssi"] for hit in d.get("leaves", [])}
+                # Initial position: whatever centroid /api/live computed.
+                # We may overwrite below using the TRACK's fingerprint
+                # (which has wider leaf coverage than this single MAC).
                 pos = (d.get("x"), d.get("y"), d.get("z"))
                 if pos[0] is None:
                     pos = None
@@ -183,7 +230,6 @@ class TrackStore:
                 else:
                     track = self._best_match(rssi_vec, claimed, now)
                     if track is None:
-                        # 3. No match → new track
                         tid = uuid.uuid4().hex[:12]
                         track = Track(
                             track_id=tid, first_seen=now, last_seen=now,
@@ -194,15 +240,39 @@ class TrackStore:
                     self.mac_to_track[mac] = track.track_id
                     claimed.add(track.track_id)
 
+                # ---- track-level multilat using accumulated fingerprint ----
+                pos_method = d.get("pos_method", "centroid")
+                if calibration is not None and positions is not None:
+                    # Track fingerprint: {leaf: ewma_rssi}; rounded ints OK
+                    track_fp = {leaf: int(round(r)) for leaf, r in track.fingerprint.items()
+                                if leaf in positions}
+                    if len(track_fp) >= 4:
+                        # Lazy import to avoid circular dep
+                        from mockingbird_calibration import multilaterate
+                        res = multilaterate(track_fp, positions, calibration, bounds=multilat_bounds)
+                        if res is not None:
+                            px, py, pz, _rmse = res
+                            # Pump through the smoother (replaces last_position EWMA)
+                            track.update(mac, {}, (px, py, pz), now)
+                            pos_method = "multilat-track"
+
                 trail = [{"ts": p.ts, "x": p.x, "y": p.y, "z": p.z} for p in track.trail]
-                out.append({
+                smoothed = track.last_position
+                enriched = {
                     **d,
+                    "raw_x": d.get("x"), "raw_y": d.get("y"), "raw_z": d.get("z"),
+                    "x": smoothed[0] if smoothed else d.get("x"),
+                    "y": smoothed[1] if smoothed else d.get("y"),
+                    "z": smoothed[2] if smoothed else d.get("z"),
                     "track_id": track.track_id,
                     "track_name": track.name,
                     "track_age_s": round(now - track.first_seen, 1),
                     "track_macs": list(track.mac_history) + [track.current_mac],
+                    "track_leaves": len(track.fingerprint),
                     "trail": trail,
-                })
+                    "pos_method": pos_method,
+                }
+                out.append(enriched)
         return out
 
     def _best_match(self, rssi_vec: dict[str, int], claimed: set[str], now: float) -> Track | None:

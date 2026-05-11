@@ -159,9 +159,16 @@ def fit_pathloss(db: sqlite3.Connection,
             p0_k, n_k = _linear_fit(xs_k, ys_k)
             if p0_k is not None:
                 p0_new, n_new = p0_k, n_k
-        # Sanity-check: indoor n is typically 1.8–4.5
-        if not (1.0 <= n_new <= 6.0):
-            return None
+        # ---- Clamp n to physically plausible indoor range ----
+        # Centroid bootstrap biases distances toward strong-RSSI leaves,
+        # which can produce n outside the physical range [2.0, 4.5].
+        # If we landed there, fix n to a typical indoor value and refit P0
+        # alone (1-D mean): P0 = mean(rssi + 10n·log10(d_i)) on kept set.
+        N_INDOOR_MIN, N_INDOOR_MAX = 2.0, 4.5
+        if not (N_INDOOR_MIN <= n_new <= N_INDOOR_MAX):
+            n_new = min(N_INDOOR_MAX, max(N_INDOOR_MIN, 2.5))
+            # y - n*x = P0 (no slope to fit); mean of (y - n*x) is P0
+            p0_new = sum(y - n_new * x for x, y in zip(xs_k, ys_k)) / len(xs_k)
         residuals = [y - (p0_new + n_new * x) for x, y in zip(xs_k, ys_k)]
         rmse = math.sqrt(sum(r * r for r in residuals) / len(residuals)) if residuals else float("inf")
         p0, n = p0_new, n_new
