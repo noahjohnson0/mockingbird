@@ -209,6 +209,55 @@
   @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
   .fadein { animation: fadein 240ms ease-out; }
   #scene { position: relative; }
+  /* leaf stats + estimate panels in the side panel */
+  .leaf-stats {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 10px; color: #6b7280; margin-top: 4px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .leaf-stats .stat-bar {
+    flex: 1; height: 4px; background: #14181f; border-radius: 2px;
+    overflow: hidden; position: relative; min-width: 50px;
+  }
+  .leaf-stats .stat-bar::after {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, #1d6fef, #79c4ff);
+    width: var(--strength, 0%); border-radius: 2px;
+    transition: width 300ms ease-out;
+  }
+  .leaf-estimate {
+    background: #1a2230; border: 1px dashed #3a4a6a; border-radius: 4px;
+    padding: 8px; margin-top: 8px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px;
+  }
+  .leaf-estimate .est-coords {
+    font-family: ui-monospace, "SF Mono", monospace; color: #79c4ff;
+    flex: 1;
+  }
+  .leaf-estimate .est-meta { color: #6b7280; font-size: 10px; }
+  .leaf-estimate button.use-est {
+    margin: 0; padding: 4px 8px; font-size: 11px;
+    background: #1d6fef; color: white;
+  }
+  /* view controls overlay in scene area */
+  #view-controls {
+    position: absolute; top: 12px; left: 12px; z-index: 4;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #view-controls .vc-row { display: flex; gap: 4px; }
+  #view-controls button {
+    background: rgba(20,22,26,0.85); border: 1px solid #2a2e36;
+    color: #cdd1d7; font-size: 11px; padding: 4px 10px;
+    margin: 0; cursor: pointer; min-width: 38px;
+    font-family: inherit;
+  }
+  #view-controls button:hover { background: rgba(28,31,36,0.95); color: #fff; }
+  #view-controls button.active { background: #1d6fef; color: white; border-color: #1d6fef; }
+  #view-controls .vc-label {
+    font-size: 9px; color: #6b7280; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-top: 6px; padding-left: 2px;
+  }
 </style>
 </head>
 <body>
@@ -221,6 +270,26 @@
     <div class="stage" id="scene-loader-stage">loading 3D engine…</div>
   </div>
   <div id="scene-busy"><div class="spinner sm"></div></div>
+  <div id="view-controls">
+    <div class="vc-label">camera</div>
+    <div class="vc-row">
+      <button data-cam="persp" class="active" title="Perspective camera">3D</button>
+      <button data-cam="ortho" title="Orthographic camera (no perspective foreshortening)">ortho</button>
+    </div>
+    <div class="vc-label">view</div>
+    <div class="vc-row">
+      <button data-view="iso"    title="Isometric (default)">iso</button>
+      <button data-view="top"    title="Top-down (X-Y plane)">top</button>
+    </div>
+    <div class="vc-row">
+      <button data-view="front"  title="Front (X-Z plane, +Y forward)">front</button>
+      <button data-view="back"   title="Back (X-Z plane, -Y forward)">back</button>
+    </div>
+    <div class="vc-row">
+      <button data-view="left"   title="Left side (Y-Z plane, +X forward)">left</button>
+      <button data-view="right"  title="Right side (Y-Z plane, -X forward)">right</button>
+    </div>
+  </div>
 </div>
 <div id="side">
   <div class="tabs">
@@ -402,13 +471,81 @@ sceneEl.appendChild(labelRenderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0c0d10);
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
-camera.position.set(5, 4, 5);
+const perspCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
+perspCamera.position.set(5, 4, 5);
+
+// Orthographic camera — frustum sized so the room is comfortably framed.
+// Re-sized by fit() to match the scene aspect ratio.
+const orthoCamera = new THREE.OrthographicCamera(-4, 4, 4, -4, 0.01, 200);
+orthoCamera.position.set(5, 4, 5);
+
+// "camera" is the active one; we swap which one OrbitControls + render
+// receive when the user toggles modes. Note: `let` not `const` so the
+// existing `controls.update()` / `renderer.render(scene, camera)` calls
+// keep working after we reassign.
+let camera = perspCamera;
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(2, 1, 2);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+
+function setCameraMode(mode) {
+  const target = controls.target.clone();
+  const pos = camera.position.clone();
+  if (mode === 'ortho' && camera !== orthoCamera) {
+    orthoCamera.position.copy(pos);
+    camera = orthoCamera;
+  } else if (mode === 'persp' && camera !== perspCamera) {
+    perspCamera.position.copy(pos);
+    camera = perspCamera;
+  } else return;
+  // OrbitControls captures the camera reference internally — easiest is to
+  // re-attach. Use the public `object` setter (works in r0.160).
+  controls.object = camera;
+  controls.target.copy(target);
+  controls.update();
+  fit();
+  // Reflect in UI
+  document.querySelectorAll('#view-controls [data-cam]').forEach(b =>
+    b.classList.toggle('active', b.dataset.cam === mode));
+}
+
+// Snap to a canonical view. Animates over ~360ms.
+function snapView(name) {
+  // Frame around the room midpoint (falls back to 2,1,2 if no room).
+  const tgt = roomDims
+    ? new THREE.Vector3(roomDims.W / 2, roomDims.H / 2, roomDims.D / 2)
+    : controls.target.clone();
+  // Distance set so the room fills ~60% of the viewport.
+  const span = roomDims ? Math.max(roomDims.W, roomDims.D, roomDims.H) : 3;
+  const d = span * 1.4 + 1.5;
+  let pos;
+  switch (name) {
+    case 'top':   pos = tgt.clone().add(new THREE.Vector3( 0,  d * 1.2,  0.01)); break;
+    case 'front': pos = tgt.clone().add(new THREE.Vector3( 0,  0,        -d  )); break;
+    case 'back':  pos = tgt.clone().add(new THREE.Vector3( 0,  0,         d  )); break;
+    case 'left':  pos = tgt.clone().add(new THREE.Vector3(-d,  0,         0  )); break;
+    case 'right': pos = tgt.clone().add(new THREE.Vector3( d,  0,         0  )); break;
+    case 'iso':
+    default:      pos = tgt.clone().add(new THREE.Vector3( d * 0.7, d * 0.7, d * 0.7));
+  }
+  // Tween camera position + target. Small custom tween (no GSAP needed).
+  const startPos = camera.position.clone();
+  const startTgt = controls.target.clone();
+  const t0 = performance.now();
+  const dur = 380;
+  function step() {
+    const t = Math.min(1, (performance.now() - t0) / dur);
+    // ease-in-out cubic
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    camera.position.lerpVectors(startPos, pos, e);
+    controls.target.lerpVectors(startTgt, tgt, e);
+    controls.update();
+    if (t < 1) requestAnimationFrame(step);
+  }
+  step();
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -532,8 +669,19 @@ function fit() {
   const w = sceneEl.clientWidth, h = sceneEl.clientHeight;
   renderer.setSize(w, h);
   labelRenderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  const aspect = w / h;
+  perspCamera.aspect = aspect;
+  perspCamera.updateProjectionMatrix();
+  // Frame the ortho cam so its vertical extent matches the perspective
+  // cam at its current distance from target. That way toggling between
+  // them feels like a "flatten" and not a sudden zoom.
+  const dist = perspCamera.position.distanceTo(controls.target);
+  const v = Math.tan(perspCamera.fov * Math.PI / 360) * dist;
+  orthoCamera.top    =  v;
+  orthoCamera.bottom = -v;
+  orthoCamera.left   = -v * aspect;
+  orthoCamera.right  =  v * aspect;
+  orthoCamera.updateProjectionMatrix();
 }
 addEventListener('resize', fit);
 fit();
@@ -790,18 +938,92 @@ function renderLeaves(leaves) {
   for (const [name, entry] of leavesByName) {
     if (!live.has(name)) { leafGroup.remove(entry.mesh); leavesByName.delete(name); }
   }
-  // Place positioned ones
+  // Place positioned ones — and render estimates as semi-transparent
+  // ghosts for unpositioned leaves so the user can see where the system
+  // thinks they are while they're physically placing them.
   leaves.forEach((leaf, idx) => {
-    if (leaf.x === null || leaf.x === undefined) return; // unpositioned: skip 3D
+    const positioned = leaf.x !== null && leaf.x !== undefined;
+    const hasEstimate = !positioned && leaf.estimate && typeof leaf.estimate.x === 'number';
+    if (!positioned && !hasEstimate) return;  // nothing to render
     const entry = ensureLeafMesh(leaf, idx);
-    entry.mesh.position.set(leaf.x, leaf.z, leaf.y);
+    const x = positioned ? leaf.x : leaf.estimate.x;
+    const y = positioned ? leaf.y : leaf.estimate.y;
+    const z = positioned ? leaf.z : leaf.estimate.z;
+    entry.mesh.position.set(x, z, y);
+    // Style: solid when positioned, ghosted when only estimated.
+    entry.mesh.material.opacity = positioned ? 1.0 : 0.35;
+    entry.mesh.material.transparent = !positioned;
     const loc = leaf.location ? ` · ${leaf.location}` : '';
-    entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${loc}`;
+    const suffix = positioned ? loc : ' (estimated)';
+    entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${suffix}`;
+    entry.labelEl.style.opacity = positioned ? 1 : 0.65;
+    entry.labelEl.style.borderStyle = positioned ? 'solid' : 'dashed';
   });
 }
 
 // ---- side panel ----
 const sideEl = document.getElementById('leaves');
+
+// Update the per-leaf RSSI stats line in a row. Pure DOM mutation — never
+// re-creates the row. Called both on initial render and on every poll.
+function updateLeafStats(rowEl, leaf) {
+  const host = rowEl.querySelector('[data-stats]');
+  if (!host) return;
+  const s = leaf.stats;
+  if (!s) {
+    host.innerHTML = leaf.online ? '<span style="color:#6b7280">no recent obs</span>' : '';
+    return;
+  }
+  // Map top RSSI to a 0–100% bar: -100dBm → 0%, -20dBm → 100%
+  const pct = Math.max(0, Math.min(100, ((s.top_rssi + 100) / 80) * 100));
+  host.innerHTML = `
+    <span title="distinct MACs seen in last 20s">${s.n_devices}d</span>
+    <span title="strongest single observation">top ${s.top_rssi}</span>
+    <span title="median per-MAC strongest RSSI">med ${s.median_rssi} dBm</span>
+    <div class="stat-bar" style="--strength:${pct.toFixed(0)}%" title="top RSSI strength"></div>
+  `;
+}
+
+// Render or update the "≈ (x, y, z)" estimate hint + "use estimate" button
+// for an unpositioned leaf. Idempotent — safe to call every poll.
+function updateLeafEstimate(rowEl, leaf) {
+  const host = rowEl.querySelector('[data-estimate-host]');
+  if (!host) return;
+  const positioned = leaf.x !== null && leaf.x !== undefined;
+  if (positioned || !leaf.estimate) {
+    host.innerHTML = '';
+    return;
+  }
+  const e = leaf.estimate;
+  host.innerHTML = `
+    <div class="leaf-estimate">
+      <div>
+        <div class="est-coords">≈ (${e.x}, ${e.y}, ${e.z}) m</div>
+        <div class="est-meta">RSSI estimate from ${e.n_devices} devices</div>
+      </div>
+      <button class="use-est">use →</button>
+    </div>
+  `;
+  host.querySelector('button.use-est').addEventListener('click', async () => {
+    // Fill the row's x/y/z inputs and POST — triggers existing autoSave path
+    // but skipping the debounce since this is a deliberate user action.
+    const inputs = rowEl.querySelectorAll('input[type="number"]');
+    if (inputs.length < 3) return;
+    inputs[0].value = e.x; inputs[1].value = e.y; inputs[2].value = e.z;
+    try {
+      const r = await fetch('/api/leaves', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leaf: leaf.leaf, x: e.x, y: e.y, z: e.z }),
+      });
+      if (r.ok) {
+        toast(`${leaf.leaf.replace('mockingbird-','')} ← estimate (${e.x}, ${e.y}, ${e.z})`);
+        refresh({ force: true });
+      } else {
+        toast('save failed: ' + (await r.text()), 'err');
+      }
+    } catch (err) { toast('network error: ' + err.message, 'err'); }
+  });
+}
 
 const renderedLeaves = new Set();  // names already rendered into the side panel
 let firstRender = true;
@@ -817,8 +1039,9 @@ function renderSide(leaves, { force = false } = {}) {
     return;
   }
   firstRender = false;
-  // Update existing rows' read-only bits (status / location) without touching inputs.
-  // Render fully only for leaves that don't have a row yet.
+  // Update existing rows' read-only bits (status / location / stats / estimate)
+  // without touching inputs. Render fully only for leaves that don't have a
+  // row yet — preserves any in-progress typing in the x/y/z inputs.
   for (const leaf of leaves) {
     const existing = document.querySelector(`[data-leaf-row="${leaf.leaf}"]`);
     if (existing) {
@@ -827,8 +1050,10 @@ function renderSide(leaves, { force = false } = {}) {
       if (loc) loc.textContent = leaf.location || '';
       if (status) {
         const pos = leaf.x !== null && leaf.x !== undefined;
-        status.textContent = `${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}`;
+        status.textContent = `${pos ? 'positioned' : 'no position yet'} ${leaf.online ? '· online' : '· offline'}`;
       }
+      updateLeafStats(existing, leaf);
+      updateLeafEstimate(existing, leaf);
     }
   }
   leaves.forEach((leaf, idx) => {
@@ -844,16 +1069,20 @@ function renderSide(leaves, { force = false } = {}) {
         <div class="leaf-name"><span class="leaf-dot" style="background:${colorHex}"></span>${leaf.leaf.replace('mockingbird-', '')}</div>
         <div class="leaf-loc">${leaf.location || ''}</div>
       </div>
-      <div class="leaf-status">${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}</div>
+      <div class="leaf-status">${pos ? 'positioned' : 'no position yet'} ${leaf.online ? '· online' : '· offline'}</div>
+      <div class="leaf-stats" data-stats></div>
       <div class="row">
         <input type="number" step="0.01" name="x" placeholder="x" value="${pos ? leaf.x : ''}">
         <input type="number" step="0.01" name="y" placeholder="y" value="${pos ? leaf.y : ''}">
         <input type="number" step="0.01" name="z" placeholder="z" value="${pos ? leaf.z : ''}">
       </div>
+      <div data-estimate-host></div>
       <input type="text" name="notes" placeholder="notes (optional)" value="${leaf.notes || ''}" style="margin-top:6px">
       ${pos ? `<button class="ghost" data-clear="${leaf.leaf}">clear position</button>` : ''}
     `;
     sideEl.appendChild(div);
+    updateLeafStats(div, leaf);
+    updateLeafEstimate(div, leaf);
 
     // Debounced auto-save on any input change in this row.
     const inputs = div.querySelectorAll('input');
@@ -1096,6 +1325,14 @@ function setTab(name) {
 }
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => setTab(t.dataset.tab));
+});
+
+// ---- view controls (camera mode + snap views) ----
+document.querySelectorAll('#view-controls [data-cam]').forEach(b => {
+  b.addEventListener('click', () => setCameraMode(b.dataset.cam));
+});
+document.querySelectorAll('#view-controls [data-view]').forEach(b => {
+  b.addEventListener('click', () => snapView(b.dataset.view));
 });
 
 // ---- live-pane toolbar wiring ----
