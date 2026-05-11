@@ -47,6 +47,22 @@
   button:hover { background: #2a7cf5; }
   button.ghost:hover { background: #1c1f24; color: #cdd1d7; }
   .empty { color: #6b7280; font-style: italic; padding: 6px 0; }
+  #toast-host {
+    position: fixed; right: 16px; bottom: 16px; z-index: 1000;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .toast {
+    background: #1c1f24; border-left: 3px solid #1d6fef;
+    color: #e6e9ef; padding: 10px 14px; border-radius: 4px;
+    font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+    min-width: 220px; max-width: 360px;
+    animation: in 200ms ease-out;
+  }
+  .toast.ok    { border-color: #22c55e; }
+  .toast.err   { border-color: #ef4444; }
+  .toast.warn  { border-color: #f59e0b; }
+  @keyframes in { from { transform: translateY(8px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+  @keyframes out { to { opacity: 0; transform: translateY(-4px) } }
   .legend { margin-top: 12px; font-size: 11px; color: #6b7280; line-height: 1.6; }
   .legend kbd {
     background: #1c1f24; padding: 1px 6px; border-radius: 3px;
@@ -55,6 +71,7 @@
 </style>
 </head>
 <body>
+<div id="toast-host"></div>
 <div id="scene"></div>
 <div id="side">
   <h1>mockingbird · room</h1>
@@ -96,6 +113,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// ---- toast notifications ----
+const toastHost = document.getElementById('toast-host');
+function toast(msg, kind = 'ok', ms = 2500) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.textContent = msg;
+  toastHost.appendChild(el);
+  setTimeout(() => {
+    el.style.animation = 'out 200ms forwards';
+    setTimeout(() => el.remove(), 220);
+  }, ms);
+}
+window.toast = toast;
 
 const sceneEl = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -361,19 +392,33 @@ function renderSide(leaves, { force = false } = {}) {
       const inputs = div.querySelectorAll('input');
       const [x, y, z] = [inputs[0].value, inputs[1].value, inputs[2].value].map(parseFloat);
       const notes = inputs[3].value;
-      if ([x, y, z].some(v => Number.isNaN(v))) return alert('x/y/z must be numbers');
-      const r = await fetch('/api/leaves', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
-      });
-      if (r.ok) refresh({ force: true }); else alert(await r.text());
+      if ([x, y, z].some(v => Number.isNaN(v))) return toast('x/y/z must be numbers', 'err');
+      try {
+        const r = await fetch('/api/leaves', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
+        });
+        if (r.ok) {
+          refresh({ force: true });
+          toast(`${leaf.leaf.replace('mockingbird-','')} → (${x}, ${y}, ${z}) m`);
+        } else {
+          toast('save failed: ' + (await r.text()), 'err');
+        }
+      } catch (e) { toast('network error: ' + e.message, 'err'); }
     });
 
     const clearBtn = div.querySelector('button[data-clear]');
     if (clearBtn) clearBtn.addEventListener('click', async () => {
       if (!confirm(`clear position for ${leaf.leaf}?`)) return;
-      const r = await fetch('/api/leaves/' + encodeURIComponent(leaf.leaf), { method: 'DELETE' });
-      if (r.ok) refresh({ force: true });
+      try {
+        const r = await fetch('/api/leaves/' + encodeURIComponent(leaf.leaf), { method: 'DELETE' });
+        if (r.ok) {
+          refresh({ force: true });
+          toast(`cleared position for ${leaf.leaf.replace('mockingbird-','')}`, 'warn');
+        } else {
+          toast('delete failed', 'err');
+        }
+      } catch (e) { toast('network error: ' + e.message, 'err'); }
     });
     renderedLeaves.add(leaf.leaf);
   });
@@ -410,13 +455,24 @@ document.getElementById('room-save').addEventListener('click', async () => {
   const h = parseFloat(document.getElementById('room-h').value);
   const north_deg = parseFloat(document.getElementById('room-north').value) || 0;
   const notes = document.getElementById('room-notes').value;
-  if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return alert('W/D/H must be positive numbers');
-  const r = await fetch('/api/room', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
-  });
-  if (r.ok) refreshRoom({ syncForm: true });
-  else alert(await r.text());
+  if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) {
+    return toast('W/D/H must be positive numbers', 'err');
+  }
+  try {
+    const r = await fetch('/api/room', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
+    });
+    if (r.ok) {
+      refreshRoom({ syncForm: true });
+      toast(`room saved: ${w}×${d}×${h} m, N=${north_deg}°`);
+    } else {
+      const err = await r.text();
+      toast('save failed: ' + err, 'err');
+    }
+  } catch (e) {
+    toast('network error: ' + e.message, 'err');
+  }
 });
 
 async function refresh({ force = false } = {}) {
