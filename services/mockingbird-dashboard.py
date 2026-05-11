@@ -20,9 +20,14 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Sibling module on the Pi — same directory as this file.
+# Sibling modules on the Pi — same directory as this file.
 sys.path.insert(0, str(Path(__file__).parent))
-import mockingbird_tracks  # noqa: E402
+import mockingbird_tracks       # noqa: E402
+import mockingbird_calibration  # noqa: E402
+
+# Latest fitted path-loss params (None until first /api/calibrate call).
+# When set, /api/live uses multilateration in place of weighted-centroid.
+CALIBRATION: mockingbird_calibration.CalibrationParams | None = None
 
 DB_PATH = Path.home() / "mockingbird" / "observations.sqlite"
 HTML_PATH = Path(__file__).parent / "dashboard.html"
@@ -286,6 +291,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(500, b"dashboard.html missing", "text/plain")
             return self._send(200, html, "text/html; charset=utf-8")
 
+        if url.path == "/api/calibration":
+            cal = CALIBRATION
+            if cal is None:
+                return self._json({"calibrated": False})
+            return self._json({
+                "calibrated": True,
+                "p0": cal.p0, "n": cal.n, "rmse_dbm": cal.rmse_dbm,
+                "n_points": cal.n_points, "n_devices": cal.n_devices,
+                "fit_ts": cal.fit_ts, "fit_age_s": round(time.time() - cal.fit_ts, 1),
+            })
+
         if url.path == "/api/leaves":
             db = open_db()
             positioned = {row[0]: dict(zip(["leaf","x","y","z","units","notes"], row))
@@ -360,35 +376,74 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for (mac, leaf), (rssi, name, manuf) in best.items():
                 by_mac.setdefault(mac, []).append((leaf, rssi, name, manuf))
             devices = []
+            cal = CALIBRATION
+            method = "centroid"
+            # Bounds for multilateration sanity-check: room + 1m margin.
+            room_row = db.execute(
+                "SELECT width, depth, height FROM room WHERE id = 1"
+            ).fetchone()
+            if room_row:
+                rw, rd, rh = room_row
+                multilat_bounds = (-1.0, rw + 1.0, -1.0, rd + 1.0, -0.5, rh + 0.5)
+            else:
+                multilat_bounds = (-5.0, 15.0, -5.0, 15.0, -1.0, 4.0)
             for mac, hits in by_mac.items():
                 if len(hits) < 2:
                     continue  # need ≥2 positioned-leaf hits for any position confidence
-                num_x = num_y = num_z = denom = 0.0
+                # Common metadata
                 rssi_max = -999
                 leaves_seen = []
                 name = manuf = None
+                rssi_per_leaf: dict[str, int] = {}
                 for leaf, rssi, lname, lmanuf in hits:
-                    w = 10.0 ** (rssi / 20.0)  # linear amplitude → relative loudness
-                    px, py, pz = positions[leaf]
-                    num_x += w * px; num_y += w * py; num_z += w * pz
-                    denom += w
+                    rssi_per_leaf[leaf] = rssi
                     if rssi > rssi_max:
                         rssi_max = rssi
                     leaves_seen.append({"leaf": leaf, "rssi": rssi})
                     name = name or lname
                     manuf = manuf or lmanuf
+                # Position: prefer multilateration when calibrated AND we
+                # have ≥4 hits; else fall back to amplitude-weighted centroid.
+                px = py = pz = None
+                pos_method = "centroid"
+                if cal is not None and len(rssi_per_leaf) >= 4:
+                    res = mockingbird_calibration.multilaterate(
+                        rssi_per_leaf, positions, cal, bounds=multilat_bounds,
+                    )
+                    if res is not None:
+                        px, py, pz, _rmse = res
+                        pos_method = "multilat"
+                        method = "multilat"
+                if px is None:
+                    num_x = num_y = num_z = denom = 0.0
+                    for leaf, rssi in rssi_per_leaf.items():
+                        w = 10.0 ** (rssi / 20.0)
+                        ax, ay, az = positions[leaf]
+                        num_x += w * ax; num_y += w * ay; num_z += w * az; denom += w
+                    px, py, pz = num_x / denom, num_y / denom, num_z / denom
                 devices.append({
                     "mac": mac, "name": name, "manuf": manuf,
-                    "x": num_x / denom, "y": num_y / denom, "z": num_z / denom,
+                    "x": px, "y": py, "z": pz,
                     "rssi_max": rssi_max, "n_leaves": len(hits),
                     "leaves": leaves_seen,
+                    "pos_method": pos_method,
                 })
             devices.sort(key=lambda d: d["rssi_max"], reverse=True)
             # Push through the track tracker — adds track_id, track_name,
             # track_age_s, track_macs, and a position-history trail to
             # each device entry.
             tracked = mockingbird_tracks.store.step(devices, now=now)
-            return self._json({"as_of": now, "window_s": LIVE_WINDOW_S, "devices": tracked})
+            return self._json({
+                "as_of": now,
+                "window_s": LIVE_WINDOW_S,
+                "method": method,  # "multilat" or "centroid"
+                "calibration": (None if cal is None else {
+                    "p0": cal.p0, "n": cal.n, "rmse_dbm": cal.rmse_dbm,
+                    "n_points": cal.n_points, "n_devices": cal.n_devices,
+                    "fit_age_s": round(now - cal.fit_ts, 1),
+                }),
+                "devices": tracked,
+            })
 
         if url.path == "/api/room":
             db = open_db()
@@ -406,6 +461,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urlparse(self.path)
+        if url.path == "/api/calibrate":
+            global CALIBRATION
+            db = open_db()
+            positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
+                "SELECT leaf, x, y, z FROM leaf_position"
+            )}
+            if len(positions) < 4:
+                return self._json({"error": "need ≥4 positioned leaves for calibration"}, 400)
+            cal = mockingbird_calibration.fit_pathloss(db, positions)
+            if cal is None:
+                return self._json({"error": "not enough data — wait a few seconds and retry"}, 400)
+            CALIBRATION = cal
+            return self._json({
+                "calibrated": True,
+                "p0": cal.p0, "n": cal.n, "rmse_dbm": cal.rmse_dbm,
+                "n_points": cal.n_points, "n_devices": cal.n_devices,
+                "fit_ts": cal.fit_ts,
+            })
+
         if url.path == "/api/room":
             try:
                 msg = json.loads(self._read_body() or "{}")
