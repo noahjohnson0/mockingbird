@@ -1,4 +1,4 @@
-# noahnet
+# mockingbird
 
 A small home mesh network platform. A travel router as the anchor, a
 Raspberry Pi as the processing/storage backend, and a fleet of ESP32 leaves
@@ -15,10 +15,10 @@ network is general-purpose; capabilities get layered on as they're built.
                            │
                            ▼
             ┌──────────────────────────────────┐
-            │ GL.iNet Opal "noahnet-router"    │
+            │ GL.iNet Opal "mockingbird-router"    │
             │   WAN: upstream WiFi entropy-5G  │
             │   LAN: 192.168.8.0/24            │
-            │   SSID: noahnet (2.4 GHz)        │
+            │   SSID: mockingbird (2.4 GHz)        │
             │   Tailscale: subnet router       │
             └─────────────┬────────────────────┘
                           │ 2.4 GHz
@@ -35,11 +35,11 @@ network is general-purpose; capabilities get layered on as they're built.
 
 - **GL.iNet GL-SFT1200 "Opal"** (the network anchor). Travel router running
   GL.iNet's OpenWrt-based firmware. Connects to the household's upstream
-  WiFi (`entropy-5G`) via WiFi-as-WAN and rebroadcasts its own `noahnet`
+  WiFi (`entropy-5G`) via WiFi-as-WAN and rebroadcasts its own `mockingbird`
   SSID on 2.4 GHz. Hosts the Tailscale subnet router so the whole
   `192.168.8.0/24` LAN is reachable from any tailnet peer.
 
-- **Raspberry Pi Zero W** (processing + storage). Joins `noahnet` over
+- **Raspberry Pi Zero W** (processing + storage). Joins `mockingbird` over
   WiFi. Aggregates data from the ESP32 leaves, runs whatever post-
   processing each capability needs, and persists results. No on-device
   Tailscale — reaches the tailnet via the Opal's subnet route.
@@ -52,7 +52,7 @@ network is general-purpose; capabilities get layered on as they're built.
     WiFi is busy. Cheap to deploy, good for spatial coverage.
   - **Paired specialist** — two ESP32s wired together via UART. One
     BLE-only (~100% BLE duty cycle, WiFi disabled), one WiFi-only
-    (associated to `noahnet`, forwards observations to the Pi).
+    (associated to `mockingbird`, forwards observations to the Pi).
     Use for remote out-of-range BLE locations or critical-coverage
     spots where you need clean RSSI + complete advert capture.
 
@@ -108,32 +108,32 @@ echo "tskey-auth-..." > ~/repos/.scratch/tailscale-authkey
 ```
 
 The script:
-1. Renames the device to `noahnet-router`
+1. Renames the device to `mockingbird-router`
 2. Joins `entropy-5G` as upstream (WiFi-as-WAN repeater mode)
-3. Rebroadcasts the new `noahnet` SSID on 2.4 GHz (auto-generated PSK,
-   saved to `~/repos/.scratch/noahnet-wifi.txt`)
+3. Rebroadcasts the new `mockingbird` SSID on 2.4 GHz (auto-generated PSK,
+   saved to `~/repos/.scratch/mockingbird-wifi.txt`)
 4. Installs the Tailscale package and runs `tailscale up` with the staged
    authkey, `--advertise-routes=192.168.8.0/24`
 
 After it runs, approve the subnet route in the Tailscale admin console
 (`https://login.tailscale.com/admin/machines`).
 
-## Adding a leaf to noahnet
+## Adding a leaf to mockingbird
 
-Any device that joins the `noahnet` SSID with the PSK from
-`~/repos/.scratch/noahnet-wifi.txt` becomes a member. From any tailnet
+Any device that joins the `mockingbird` SSID with the PSK from
+`~/repos/.scratch/mockingbird-wifi.txt` becomes a member. From any tailnet
 peer it'll be reachable by its `192.168.8.x` LAN IP.
 
 For the Pi:
 
 ```bash
 # from the Mac
-NM_KEY=$(awk -F= '/^PSK=/{print $2}' ~/repos/.scratch/noahnet-wifi.txt)
+NM_KEY=$(awk -F= '/^PSK=/{print $2}' ~/repos/.scratch/mockingbird-wifi.txt)
 ssh pi@raspberrypi.local "
-  sudo nmcli connection add type wifi con-name noahnet ifname wlan0 \
-       ssid noahnet 802-11-wireless-security.key-mgmt wpa-psk \
+  sudo nmcli connection add type wifi con-name mockingbird ifname wlan0 \
+       ssid mockingbird 802-11-wireless-security.key-mgmt wpa-psk \
        wifi-sec.psk '$NM_KEY'
-  sudo nmcli connection up noahnet
+  sudo nmcli connection up mockingbird
 "
 ```
 
