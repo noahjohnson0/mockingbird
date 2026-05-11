@@ -402,14 +402,29 @@
         <select id="cal-track-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
       </div>
     </div>
-    <button id="ad-start" class="ghost" style="margin-top: 4px; font-size: 11px">auto-detect: walk phone between 4 leaves</button>
+    <div style="display:flex; gap: 6px; margin-top: 4px">
+      <button id="ad-start" class="ghost" style="font-size: 11px; flex: 1">auto-detect (click between leaves)</button>
+      <button id="ad-voice-start" style="font-size: 11px; flex: 1">🔊 voice-guided (hands-free)</button>
+    </div>
 
     <div id="ad-wizard" style="display:none; margin-top: 10px; padding: 10px; background: #14181f; border: 1px dashed #3a4a6a; border-radius: 6px">
-      <div id="ad-step-text" style="font-size: 12px; color: #cdd1d7; margin-bottom: 8px"></div>
-      <select id="ad-leaf-pick" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
-      <div style="display:flex; gap:6px; margin-top: 8px; align-items: center">
-        <button id="ad-go" style="margin: 0">place phone, then click Go (10 s)</button>
-        <span id="ad-progress" style="color: #79c4ff; font-family: ui-monospace, monospace; font-size: 11px"></span>
+      <!-- Voice-guided large display -->
+      <div id="ad-voice-panel" style="display:none; text-align: center; margin-bottom: 12px">
+        <div id="ad-big-countdown" style="font-size: 72px; font-weight: 700; color: #79c4ff; font-family: ui-monospace, monospace; line-height: 1">—</div>
+        <div id="ad-phase" style="font-size: 13px; color: #cdd1d7; margin-top: 4px">ready</div>
+        <div id="ad-subtitle" style="font-size: 11px; color: #6b7280; margin-top: 8px; font-style: italic; min-height: 30px"></div>
+        <div id="ad-dots" style="font-size: 18px; letter-spacing: 0.3em; color: #2a2e36; margin-top: 6px"></div>
+      </div>
+      <!-- Manual mode -->
+      <div id="ad-manual-panel">
+        <div id="ad-step-text" style="font-size: 12px; color: #cdd1d7; margin-bottom: 8px"></div>
+        <select id="ad-leaf-pick" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
+        <div style="display:flex; gap:6px; margin-top: 8px; align-items: center">
+          <button id="ad-go" style="margin: 0">place phone, then click Go (10 s)</button>
+          <span id="ad-progress" style="color: #79c4ff; font-family: ui-monospace, monospace; font-size: 11px"></span>
+        </div>
+      </div>
+      <div style="text-align: right; margin-top: 8px">
         <button id="ad-cancel" class="ghost" style="margin: 0; padding: 4px 8px; font-size: 10px">cancel</button>
       </div>
       <div id="ad-visits" style="font-size: 10px; color: #6b7280; margin-top: 8px; font-family: ui-monospace, monospace"></div>
@@ -1981,12 +1996,117 @@ document.getElementById('ad-start').addEventListener('click', () => {
   adVisits = [];
   adActive = true;
   adWizard.style.display = 'block';
+  document.getElementById('ad-manual-panel').style.display = 'block';
+  document.getElementById('ad-voice-panel').style.display = 'none';
   adResultsEl.innerHTML = '';
   adRefreshVisits();
   adSetStep(1);
 });
+
+// ---- voice-guided variant ----
+// Speech synthesis is available without install in all modern browsers.
+// The click on the start button is the user-gesture that unlocks audio
+// (required by browser autoplay policies); after that all speak()
+// calls work fine until the page reloads.
+let _adVoiceAborted = false;
+function adSpeak(text, subtitle) {
+  document.getElementById('ad-subtitle').textContent = subtitle ?? text;
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
+  window.speechSynthesis.cancel();   // drop any queued
+  window.speechSynthesis.speak(u);
+}
+async function adSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function adCountdown(seconds, label, withTicks = true) {
+  document.getElementById('ad-phase').textContent = label;
+  const big = document.getElementById('ad-big-countdown');
+  for (let i = seconds; i > 0; i--) {
+    if (_adVoiceAborted) return false;
+    big.textContent = i;
+    // Speak the last 3 ticks but not in-between to keep the room quiet
+    if (withTicks && i <= 3) adSpeak(String(i), label + ' · ' + i);
+    await adSleep(1000);
+  }
+  big.textContent = '0';
+  return true;
+}
+function adUpdateDots(done, total) {
+  const dots = Array.from({length: total}, (_, i) => i < done ? '●' : '○').join(' ');
+  document.getElementById('ad-dots').innerHTML =
+    dots.replace(/●/g, '<span style="color:#22c55e">●</span>')
+        .replace(/○/g, '<span style="color:#2a2e36">○</span>');
+}
+function adLeafName(L) {
+  return L.location && L.location.length
+    ? L.location
+    : 'leaf ' + L.leaf.slice(-6).replace(/(.)(.)(.)(.)(.)(.)/, '$1$2$3 $4$5$6');  // help TTS phrasing
+}
+
+document.getElementById('ad-voice-start').addEventListener('click', async () => {
+  // Pick leaves: positioned leaves, prefer ones with location labels.
+  const all = await fetch('/api/leaves').then(r => r.json());
+  const positioned = all.filter(L => L.x != null);
+  if (positioned.length < 2) return toast('need ≥2 positioned leaves', 'err');
+  positioned.sort((a, b) => {
+    if (!!a.location !== !!b.location) return a.location ? -1 : 1;
+    return (a.leaf || '').localeCompare(b.leaf || '');
+  });
+  const leaves = positioned.slice(0, Math.min(4, positioned.length));
+
+  adVisits = [];
+  adActive = true;
+  _adVoiceAborted = false;
+  adWizard.style.display = 'block';
+  document.getElementById('ad-manual-panel').style.display = 'none';
+  document.getElementById('ad-voice-panel').style.display = 'block';
+  adResultsEl.innerHTML = '';
+  adUpdateDots(0, leaves.length);
+
+  adSpeak(
+    `Starting auto-detect. You will visit ${leaves.length} leaves. ` +
+    `First one: ${adLeafName(leaves[0])}. Walk there now. You have ten seconds.`,
+    `walk to ${adLeafName(leaves[0])}`,
+  );
+  if (!await adCountdown(10, `walk to ${adLeafName(leaves[0])}`, false)) return adVoiceCancel();
+
+  for (let i = 0; i < leaves.length; i++) {
+    const L = leaves[i];
+    adSpeak(
+      `Place your phone against ${adLeafName(L)}. Recording for ten seconds.`,
+      `recording at ${adLeafName(L)}`,
+    );
+    const ts_start = Date.now() / 1000;
+    if (!await adCountdown(10, `recording at ${adLeafName(L)}`, true)) return adVoiceCancel();
+    const ts_end = Date.now() / 1000;
+    adVisits.push({ leaf: L.leaf, ts_start, ts_end });
+    adUpdateDots(i + 1, leaves.length);
+
+    if (i < leaves.length - 1) {
+      const next = leaves[i + 1];
+      adSpeak(
+        `Got it. Walk to ${adLeafName(next)}. You have ten seconds.`,
+        `walk to ${adLeafName(next)}`,
+      );
+      if (!await adCountdown(10, `walk to ${adLeafName(next)}`, false)) return adVoiceCancel();
+    }
+  }
+  adSpeak('All four visits recorded. Analyzing.', 'analyzing…');
+  document.getElementById('ad-big-countdown').textContent = '⌛';
+  document.getElementById('ad-phase').textContent = 'analyzing…';
+  await adIdentify();
+});
+
+function adVoiceCancel() {
+  _adVoiceAborted = true;
+  window.speechSynthesis?.cancel();
+  document.getElementById('ad-phase').textContent = 'cancelled';
+  document.getElementById('ad-big-countdown').textContent = '—';
+}
 adCancel.addEventListener('click', () => {
   adActive = false;
+  _adVoiceAborted = true;
+  window.speechSynthesis?.cancel();
   adWizard.style.display = 'none';
   adVisits = [];
 });
@@ -2065,6 +2185,21 @@ async function adIdentify() {
     // Re-enable button so user can re-run or click "use" buttons cleanly
     adGo.disabled = false;
     adGo.textContent = 'Identify phone (re-run)';
+    // If we were in voice mode, speak the top result so the user can
+    // confirm without looking at the screen.
+    if (document.getElementById('ad-voice-panel').style.display !== 'none') {
+      const top = cands[0];
+      const topName = top.track_name || ('mac ending ' + top.mac.slice(-5));
+      const others = cands.filter(c => c.n_distinct_leaves === top.n_distinct_leaves).length;
+      adSpeak(
+        `Done. Top candidate: ${topName}. ` +
+        (others > 1 ? `${others - 1} other candidates with equal score. ` : '') +
+        `Tap use on the screen to confirm.`,
+        `top: ${topName}`,
+      );
+      document.getElementById('ad-big-countdown').textContent = '✓';
+      document.getElementById('ad-phase').textContent = 'done';
+    }
   } catch (e) {
     toast('network: ' + e.message, 'err');
     adGo.disabled = false;
