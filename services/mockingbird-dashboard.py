@@ -237,6 +237,12 @@ def _init_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE room ADD COLUMN north_deg REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    try:
+        # When set, the multilat z-bound floor moves to 0 (no positions
+        # below the floor are physically possible). User toggles in Setup.
+        db.execute("ALTER TABLE room ADD COLUMN is_ground_floor INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
 
 def open_db() -> sqlite3.Connection:
@@ -290,6 +296,88 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._send(500, b"dashboard.html missing", "text/plain")
             return self._send(200, html, "text/html; charset=utf-8")
+
+        if url.path == "/api/system":
+            db = open_db()
+            now = time.time()
+            # ----- Pi stats -----
+            pi: dict = {}
+            try:
+                with open("/proc/loadavg") as f:
+                    pi["load_avg"] = [float(p) for p in f.read().split()[:3]]
+            except Exception:
+                pi["load_avg"] = None
+            try:
+                with open("/proc/uptime") as f:
+                    pi["uptime_s"] = int(float(f.read().split()[0]))
+            except Exception:
+                pi["uptime_s"] = None
+            try:
+                with open("/proc/meminfo") as f:
+                    mem = {}
+                    for line in f:
+                        if ":" not in line:
+                            continue
+                        k, v = line.split(":", 1)
+                        mem[k.strip()] = int(v.strip().split()[0])  # in kB
+                    pi["mem_total_kb"] = mem.get("MemTotal")
+                    pi["mem_available_kb"] = mem.get("MemAvailable")
+                    pi["mem_used_pct"] = (
+                        round(100 * (1 - mem["MemAvailable"] / mem["MemTotal"]), 1)
+                        if mem.get("MemTotal") else None
+                    )
+            except Exception:
+                pass
+            try:
+                import shutil
+                total, _used, free = shutil.disk_usage("/")
+                pi["disk_total_gb"] = round(total / 1024**3, 1)
+                pi["disk_free_gb"] = round(free / 1024**3, 1)
+                pi["disk_used_pct"] = round(100 * (1 - free / total), 1)
+            except Exception:
+                pass
+            # DB size (the obs file)
+            try:
+                pi["db_size_mb"] = round(DB_PATH.stat().st_size / 1024**2, 1)
+            except Exception:
+                pass
+            # ----- per-leaf stats from latest heartbeat -----
+            # Latest hb per leaf in last 5 min
+            rows = db.execute(
+                "SELECT leaf, ts, info FROM leaf_events "
+                "WHERE event='hb' AND ts >= ? "
+                "ORDER BY ts DESC",
+                (now - 300,),
+            ).fetchall()
+            seen = {}
+            for leaf, ts, info_s in rows:
+                if leaf in seen:
+                    continue
+                try:
+                    info = json.loads(info_s)
+                except (json.JSONDecodeError, TypeError):
+                    info = {}
+                seen[leaf] = {
+                    "leaf": leaf,
+                    "hb_age_s": round(now - ts, 1),
+                    "uptime_s": info.get("up_s"),
+                    "n_sent": info.get("n_sent"),
+                    "n_dropped": info.get("n_dropped"),
+                    "q_depth": info.get("q_depth"),
+                    "heap_free": info.get("heap"),
+                    "wifi_rssi": info.get("rssi"),
+                }
+            # Add obs rate over last 30s
+            obs_rows = db.execute(
+                "SELECT leaf, COUNT(*) FROM obs INDEXED BY idx_obs_ts "
+                "WHERE ts >= ? GROUP BY leaf",
+                (now - 30,),
+            ).fetchall()
+            obs_rate = {leaf: round(n / 30.0, 1) for leaf, n in obs_rows}
+            for leaf in seen:
+                seen[leaf]["obs_per_s"] = obs_rate.get(leaf, 0.0)
+            leaves_list = sorted(seen.values(), key=lambda x: x["leaf"])
+            return self._json({"as_of": now, "pi": pi, "leaves": leaves_list})
 
         if url.path == "/api/calibration":
             cal = CALIBRATION
@@ -386,12 +474,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # enough that any plausible BLE pickup is allowed through, but
             # tight enough to reject the 10^3 m blowups.
             room_row = db.execute(
-                "SELECT width, depth, height FROM room WHERE id = 1"
+                "SELECT width, depth, height, is_ground_floor FROM room WHERE id = 1"
             ).fetchone()
             if room_row:
-                rw, rd, rh = room_row
+                rw, rd, rh, ground = room_row
                 EXTRA = 15.0
-                multilat_bounds = (-EXTRA, rw + EXTRA, -EXTRA, rd + EXTRA, -EXTRA, rh + EXTRA)
+                # Ground floor: nothing can be below z=0 (the floor). For
+                # non-ground-floor, allow EXTRA below to permit detecting
+                # devices on the floor downstairs.
+                z_min = -0.5 if ground else -EXTRA
+                multilat_bounds = (-EXTRA, rw + EXTRA, -EXTRA, rd + EXTRA, z_min, rh + EXTRA)
             else:
                 multilat_bounds = (-20.0, 20.0, -20.0, 20.0, -10.0, 10.0)
             for mac, hits in by_mac.items():
@@ -460,14 +552,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if url.path == "/api/room":
             db = open_db()
             row = db.execute(
-                "SELECT width, depth, height, notes, north_deg FROM room WHERE id = 1"
+                "SELECT width, depth, height, notes, north_deg, is_ground_floor FROM room WHERE id = 1"
             ).fetchone()
             if row:
                 return self._json({
                     "width": row[0], "depth": row[1], "height": row[2],
                     "notes": row[3], "north_deg": row[4] or 0,
+                    "is_ground_floor": bool(row[5]),
                 })
-            return self._json({"width": None, "depth": None, "height": None, "notes": None, "north_deg": 0})
+            return self._json({"width": None, "depth": None, "height": None, "notes": None,
+                               "north_deg": 0, "is_ground_floor": False})
 
         return self._send(404, b"not found", "text/plain")
 
@@ -497,18 +591,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 msg = json.loads(self._read_body() or "{}")
                 w = float(msg["width"]); d = float(msg["depth"]); h = float(msg["height"])
                 north = float(msg.get("north_deg") or 0) % 360
+                ground = 1 if msg.get("is_ground_floor") else 0
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 return self._json({"error": "width/depth/height must be numbers"}, 400)
             notes = (msg.get("notes") or "")[:200] or None
             db = open_db()
             db.execute("""
-                INSERT INTO room(id, width, depth, height, notes, north_deg, updated_ts)
-                VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
+                INSERT INTO room(id, width, depth, height, notes, north_deg, is_ground_floor, updated_ts)
+                VALUES (1, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
                 ON CONFLICT(id) DO UPDATE SET
                     width=excluded.width, depth=excluded.depth, height=excluded.height,
-                    notes=excluded.notes, north_deg=excluded.north_deg, updated_ts=excluded.updated_ts
-            """, (w, d, h, notes, north))
-            return self._json({"status": "ok", "width": w, "depth": d, "height": h, "north_deg": north})
+                    notes=excluded.notes, north_deg=excluded.north_deg,
+                    is_ground_floor=excluded.is_ground_floor,
+                    updated_ts=excluded.updated_ts
+            """, (w, d, h, notes, north, ground))
+            return self._json({"status": "ok", "width": w, "depth": d, "height": h,
+                               "north_deg": north, "is_ground_floor": bool(ground)})
         if url.path == "/api/leaves":
             try:
                 msg = json.loads(self._read_body() or "{}")
