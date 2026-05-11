@@ -311,17 +311,34 @@ function renderLeaves(leaves) {
 // ---- side panel ----
 const sideEl = document.getElementById('leaves');
 
-function renderSide(leaves) {
-  sideEl.innerHTML = '';
-  if (leaves.length === 0) {
+const renderedLeaves = new Set();  // names already rendered into the side panel
+function renderSide(leaves, { force = false } = {}) {
+  if (force) { sideEl.innerHTML = ''; renderedLeaves.clear(); }
+  if (leaves.length === 0 && renderedLeaves.size === 0) {
     sideEl.innerHTML = '<div class="empty">no leaves seen yet — flash one</div>';
     return;
   }
+  // Update existing rows' read-only bits (status / location) without touching inputs.
+  // Render fully only for leaves that don't have a row yet.
+  for (const leaf of leaves) {
+    const existing = document.querySelector(`[data-leaf-row="${leaf.leaf}"]`);
+    if (existing) {
+      const loc = existing.querySelector('.leaf-loc');
+      const status = existing.querySelector('.leaf-status');
+      if (loc) loc.textContent = leaf.location || '';
+      if (status) {
+        const pos = leaf.x !== null && leaf.x !== undefined;
+        status.textContent = `${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}`;
+      }
+    }
+  }
   leaves.forEach((leaf, idx) => {
+    if (renderedLeaves.has(leaf.leaf)) return;
     const pos = leaf.x !== null && leaf.x !== undefined;
     const entry = ensureLeafMesh(leaf, idx);
     const div = document.createElement('div');
     div.className = 'leaf' + (pos ? '' : ' unpos');
+    div.setAttribute('data-leaf-row', leaf.leaf);
     const colorHex = '#' + entry.color.toString(16).padStart(6, '0');
     div.innerHTML = `
       <div class="leaf-head">
@@ -349,21 +366,24 @@ function renderSide(leaves) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
       });
-      if (r.ok) refresh(); else alert(await r.text());
+      if (r.ok) refresh({ force: true }); else alert(await r.text());
     });
 
     const clearBtn = div.querySelector('button[data-clear]');
     if (clearBtn) clearBtn.addEventListener('click', async () => {
       if (!confirm(`clear position for ${leaf.leaf}?`)) return;
       const r = await fetch('/api/leaves/' + encodeURIComponent(leaf.leaf), { method: 'DELETE' });
-      if (r.ok) refresh();
+      if (r.ok) refresh({ force: true });
     });
+    renderedLeaves.add(leaf.leaf);
   });
 }
 
-async function refreshRoom() {
+let roomFormHydrated = false;  // input fields only set on first load + after save
+async function refreshRoom({ syncForm = false } = {}) {
   try {
     const r = await fetch('/api/room').then(r => r.json());
+    // 3D scene updates always (these don't touch inputs)
     if (r.width && r.depth && r.height) {
       const next = `${r.width}|${r.depth}|${r.height}`;
       if (!roomDims || roomDims.key !== next) {
@@ -372,16 +392,15 @@ async function refreshRoom() {
       }
     }
     setNorthRotation(r.north_deg || 0);
-    const wEl = document.getElementById('room-w');
-    const dEl = document.getElementById('room-d');
-    const hEl = document.getElementById('room-h');
-    const nEl = document.getElementById('room-notes');
-    const northEl = document.getElementById('room-north');
-    if (document.activeElement !== wEl) wEl.value = r.width ?? '';
-    if (document.activeElement !== dEl) dEl.value = r.depth ?? '';
-    if (document.activeElement !== hEl) hEl.value = r.height ?? '';
-    if (document.activeElement !== nEl) nEl.value = r.notes ?? '';
-    if (document.activeElement !== northEl) northEl.value = r.north_deg ?? 0;
+    // Inputs only touched on first hydrate or explicit syncForm (post-save)
+    if (!roomFormHydrated || syncForm) {
+      document.getElementById('room-w').value     = r.width ?? '';
+      document.getElementById('room-d').value     = r.depth ?? '';
+      document.getElementById('room-h').value     = r.height ?? '';
+      document.getElementById('room-notes').value = r.notes ?? '';
+      document.getElementById('room-north').value = r.north_deg ?? 0;
+      roomFormHydrated = true;
+    }
   } catch (e) { console.error(e); }
 }
 
@@ -396,15 +415,15 @@ document.getElementById('room-save').addEventListener('click', async () => {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
   });
-  if (r.ok) refreshRoom();
+  if (r.ok) refreshRoom({ syncForm: true });
   else alert(await r.text());
 });
 
-async function refresh() {
+async function refresh({ force = false } = {}) {
   try {
     const leaves = await fetch('/api/leaves').then(r => r.json());
     renderLeaves(leaves);
-    renderSide(leaves);
+    renderSide(leaves, { force });
   } catch (e) {
     console.error(e);
   }
