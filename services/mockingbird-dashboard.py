@@ -25,34 +25,54 @@ HTML_PATH = Path(__file__).parent / "dashboard.html"
 PORT = 8080
 
 
-def open_db() -> sqlite3.Connection:
-    db = sqlite3.connect(DB_PATH, isolation_level=None)
+_db_cache: dict[int, sqlite3.Connection] = {}
+_db_initialized = False
+
+
+def _init_schema(db: sqlite3.Connection) -> None:
+    """Run schema setup exactly once per process. CREATE TABLE IF NOT EXISTS
+    is a no-op when the table exists but still walks sqlite_master, which
+    is enough overhead per-request to matter on a Pi Zero W when the DB is
+    busy. So do it once at startup, not on every connection."""
     db.execute("""
         CREATE TABLE IF NOT EXISTS leaf_position (
             leaf      TEXT PRIMARY KEY,
-            x         REAL NOT NULL,
-            y         REAL NOT NULL,
-            z         REAL NOT NULL,
-            units     TEXT DEFAULT 'm',
-            notes     TEXT,
+            x         REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,
+            units     TEXT DEFAULT 'm', notes TEXT,
             updated_ts REAL DEFAULT (strftime('%s','now'))
         )
     """)
     db.execute("""
         CREATE TABLE IF NOT EXISTS room (
-            id      INTEGER PRIMARY KEY CHECK (id = 1),
-            width   REAL NOT NULL,
-            depth   REAL NOT NULL,
-            height  REAL NOT NULL,
-            notes   TEXT,
-            updated_ts REAL DEFAULT (strftime('%s','now'))
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            width REAL NOT NULL, depth REAL NOT NULL, height REAL NOT NULL,
+            notes TEXT, updated_ts REAL DEFAULT (strftime('%s','now'))
         )
     """)
-    # Idempotent: add north_deg if the table existed before this column
     try:
         db.execute("ALTER TABLE room ADD COLUMN north_deg REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+
+
+def open_db() -> sqlite3.Connection:
+    """Per-thread cached SQLite connection. ThreadingHTTPServer reuses
+    threads via thread pool, so this is bounded. Settings tuned for
+    reading alongside the collector's writes."""
+    global _db_initialized
+    import threading
+    tid = threading.get_ident()
+    db = _db_cache.get(tid)
+    if db is None:
+        db = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
+        # Read-friendly + WAL-aware
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA busy_timeout=2000")
+        _db_cache[tid] = db
+        if not _db_initialized:
+            _init_schema(db)
+            _db_initialized = True
     return db
 
 
@@ -93,29 +113,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           for row in db.execute(
                               "SELECT leaf, x, y, z, units, notes FROM leaf_position"
                           )}
-            # Pull recent leaves + their current location. The collector
-            # stamps every obs with the leaf's location, so a single pass
-            # over the last 60 s of obs gives us both leaf-online state
-            # and the active label. Subqueries-per-leaf were O(750k)
-            # rows each on the Pi Zero W — this is O(rows-in-60s).
-            seen = list(db.execute("""
-                SELECT leaf,
-                       MAX(location) AS location,
-                       MAX(ts)       AS last_seen
-                FROM obs
-                WHERE ts >= strftime('%s','now') - 60
-                GROUP BY leaf
-            """))
+            # Pull EVERYTHING from leaf_events (~27k rows, indexed) — skip
+            # the obs table entirely. The collector writes a heartbeat
+            # event for each leaf every 5s, which gives both "online"
+            # (last hb time) and the current location (from latest hello).
+            # obs has 1.4M+ rows being constantly written; querying it
+            # fights the collector for locks AND the optimizer picks the
+            # wrong index. leaf_events is 50× smaller and write-quiet.
+            last_event = {}      # leaf → ts of most recent event (any kind)
+            last_hello = {}      # leaf → parsed info dict from most recent hello
+            for leaf, event, ts, info in db.execute("""
+                SELECT leaf, event, ts, info FROM leaf_events
+                WHERE ts >= strftime('%s','now') - 86400
+                ORDER BY ts
+            """):
+                if ts > last_event.get(leaf, 0): last_event[leaf] = ts
+                if event == "hello" and info:
+                    try:    last_hello[leaf] = json.loads(info)
+                    except: pass
+
+            all_leaves = set(positioned) | set(last_event)
             out = []
-            for leaf, location, last_seen in seen:
-                row = positioned.pop(leaf, {"leaf": leaf, "x": None, "y": None, "z": None, "units": "m", "notes": None})
-                row["location"] = location
-                row["last_seen"] = last_seen
-                out.append(row)
-            # Plus any positioned leaves not currently streaming
-            for leaf, row in positioned.items():
-                row["location"] = None
-                row["last_seen"] = None
+            for leaf in sorted(all_leaves):
+                row = positioned.get(leaf, {"leaf": leaf, "x": None, "y": None, "z": None, "units": "m", "notes": None})
+                row.setdefault("leaf", leaf)
+                row["location"]  = (last_hello.get(leaf) or {}).get("location") or None
+                row["last_seen"] = last_event.get(leaf)
+                row["online"]    = bool(last_event.get(leaf) and (time.time() - last_event[leaf]) < 30)
                 out.append(row)
             return self._json(out)
 
