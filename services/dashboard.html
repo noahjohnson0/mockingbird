@@ -94,7 +94,7 @@
 
   <h2>room</h2>
   <div id="room-panel" class="leaf">
-    <div class="leaf-status">dimensions in metres (W × D × H)</div>
+    <div class="leaf-status">dimensions in metres (W × D × H) — auto-saves</div>
     <div class="row">
       <input type="number" step="0.01" id="room-w" placeholder="width">
       <input type="number" step="0.01" id="room-d" placeholder="depth">
@@ -105,7 +105,6 @@
     </div>
     <input type="number" step="1" id="room-north" placeholder="0" style="margin-top:4px; width:80px">
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
-    <button id="room-save">save</button>
   </div>
 
   <h2>leaves</h2>
@@ -172,6 +171,15 @@ function toast(msg, kind = 'ok', ms = 2500) {
   }, ms);
 }
 window.toast = toast;
+
+// ---- debounce helper ----
+function debounce(fn, ms = 600) {
+  let t = 0;
+  return function (...args) {
+    clearTimeout(t);
+    t = setTimeout(() => fn.apply(this, args), ms);
+  };
+}
 
 const sceneEl = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -435,29 +443,35 @@ function renderSide(leaves, { force = false } = {}) {
         <input type="number" step="0.01" name="z" placeholder="z" value="${pos ? leaf.z : ''}">
       </div>
       <input type="text" name="notes" placeholder="notes (optional)" value="${leaf.notes || ''}" style="margin-top:6px">
-      <button data-leaf="${leaf.leaf}">save</button>
-      ${pos ? `<button class="ghost" data-clear="${leaf.leaf}">clear</button>` : ''}
+      ${pos ? `<button class="ghost" data-clear="${leaf.leaf}">clear position</button>` : ''}
     `;
     sideEl.appendChild(div);
 
-    div.querySelector('button[data-leaf]').addEventListener('click', async () => {
-      const inputs = div.querySelectorAll('input');
+    // Debounced auto-save on any input change in this row.
+    const inputs = div.querySelectorAll('input');
+    const autoSave = debounce(async () => {
       const [x, y, z] = [inputs[0].value, inputs[1].value, inputs[2].value].map(parseFloat);
       const notes = inputs[3].value;
-      if ([x, y, z].some(v => Number.isNaN(v))) return toast('x/y/z must be numbers', 'err');
+      if ([x, y, z].some(v => Number.isNaN(v))) return;  // silently skip while partial
       try {
         const r = await fetch('/api/leaves', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
         });
         if (r.ok) {
-          refresh({ force: true });
+          // Optimistic 3D update: move the sphere immediately, no re-render.
+          const entry = ensureLeafMesh(leaf, idx);
+          entry.sphere.position.set(x, z, y);
+          // Make the status pill say "positioned" if it wasn't already
+          const status = div.querySelector('.leaf-status');
+          if (status) status.textContent = `positioned · ${leaf.location ? 'online' : 'online'}`;
           toast(`${leaf.leaf.replace('mockingbird-','')} → (${x}, ${y}, ${z}) m`);
         } else {
           toast('save failed: ' + (await r.text()), 'err');
         }
       } catch (e) { toast('network error: ' + e.message, 'err'); }
     });
+    inputs.forEach(input => input.addEventListener('input', autoSave));
 
     const clearBtn = div.querySelector('button[data-clear]');
     if (clearBtn) clearBtn.addEventListener('click', async () => {
@@ -501,31 +515,34 @@ async function refreshRoom({ syncForm = false } = {}) {
   } catch (e) { console.error(e); }
 }
 
-document.getElementById('room-save').addEventListener('click', async () => {
+const roomAutoSave = debounce(async () => {
   const w = parseFloat(document.getElementById('room-w').value);
   const d = parseFloat(document.getElementById('room-d').value);
   const h = parseFloat(document.getElementById('room-h').value);
   const north_deg = parseFloat(document.getElementById('room-north').value) || 0;
   const notes = document.getElementById('room-notes').value;
-  if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) {
-    return toast('W/D/H must be positive numbers', 'err');
-  }
+  // Silently skip incomplete entries — user is still typing
+  if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return;
   try {
     const r = await fetch('/api/room', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
     });
     if (r.ok) {
-      refreshRoom({ syncForm: true });
-      toast(`room saved: ${w}×${d}×${h} m, N=${north_deg}°`);
+      // Soft refresh: only the 3D scene + north arrow, keep form values.
+      const fresh = await r.json();
+      rebuildRoom(fresh.width, fresh.depth, fresh.height);
+      setNorthRotation(fresh.north_deg || 0);
+      toast(`room ${w}×${d}×${h} m · N=${north_deg}°`);
     } else {
-      const err = await r.text();
-      toast('save failed: ' + err, 'err');
+      toast('save failed: ' + (await r.text()), 'err');
     }
-  } catch (e) {
-    toast('network error: ' + e.message, 'err');
-  }
+  } catch (e) { toast('network error: ' + e.message, 'err'); }
 });
+
+for (const id of ['room-w', 'room-d', 'room-h', 'room-north', 'room-notes']) {
+  document.getElementById(id).addEventListener('input', roomAutoSave);
+}
 
 async function refresh({ force = false } = {}) {
   try {
