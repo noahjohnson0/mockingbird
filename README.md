@@ -1,158 +1,158 @@
 # noahnet
 
-General-purpose ESP32-S3 firmware that joins a Tailscale tailnet at boot and
-exposes an HTTP control + OTA endpoint. Once flashed, every device shows up
-as a peer on your tailnet — you can hit it by MagicDNS name from anywhere
-you're on the tailnet, and you can push new firmware to it the same way.
+A small home mesh network platform. A travel router as the anchor, a
+Raspberry Pi as the processing/storage backend, and a fleet of ESP32 leaves
+— all reachable from a Tailscale tailnet via a single subnet route. The
+network is general-purpose; capabilities get layered on as they're built.
 
 ```
-   WiFi STA  →  MicroLink (Tailscale ts2021 + WireGuard)  →  esp_http_server
-                                                              ├─ GET  /         status JSON
-                                                              ├─ GET  /version  app version
-                                                              ├─ POST /ota      pull-OTA from URL
-                                                              └─ POST /restart  reboot
+        ┌── Tailscale tailnet ─────────────────────────────────┐
+        │                                                      │
+        │   Noah's Mac, phone, laptop, etc.                    │
+        │                  │                                   │
+        │                  │ via subnet route 192.168.8.0/24   │
+        └──────────────────┼───────────────────────────────────┘
+                           │
+                           ▼
+            ┌──────────────────────────────────┐
+            │ GL.iNet Opal "noahnet-router"    │
+            │   WAN: upstream WiFi entropy-5G  │
+            │   LAN: 192.168.8.0/24            │
+            │   SSID: noahnet (2.4 GHz)        │
+            │   Tailscale: subnet router       │
+            └─────────────┬────────────────────┘
+                          │ 2.4 GHz
+        ┌─────────────────┴────────────────────┐
+        │                                      │
+ ┌──────────────┐                  ┌────────────────────────┐
+ │ Pi Zero W    │ ◄── HTTP/MQTT ── │ ESP32 leaves ×10       │
+ │ processing + │                  │ sensors / actuators +  │
+ │ storage      │                  │ peer-to-peer mesh      │
+ └──────────────┘                  └────────────────────────┘
 ```
 
-## Hardware
+## Components
 
-- **ESP32-S3 with PSRAM** (the OCT 8 MB variant is the safe default — what
-  [MicroLink][microlink] is tuned for). Plain ESP32-WROOM **will not work** —
-  MicroLink's H2 / JSON / peer buffers live in PSRAM.
-- 8 MB flash. The partition table allocates two ~4 MB OTA slots.
+- **GL.iNet GL-SFT1200 "Opal"** (the network anchor). Travel router running
+  GL.iNet's OpenWrt-based firmware. Connects to the household's upstream
+  WiFi (`entropy-5G`) via WiFi-as-WAN and rebroadcasts its own `noahnet`
+  SSID on 2.4 GHz. Hosts the Tailscale subnet router so the whole
+  `192.168.8.0/24` LAN is reachable from any tailnet peer.
+
+- **Raspberry Pi Zero W** (processing + storage). Joins `noahnet` over
+  WiFi. Aggregates data from the ESP32 leaves, runs whatever post-
+  processing each capability needs, and persists results. No on-device
+  Tailscale — reaches the tailnet via the Opal's subnet route.
+
+- **ESP32-WROOM-32 nodes ×10** (the leaves). Composed into logical
+  leaves — a "leaf" is a sensing/actuating role, not necessarily one
+  board. Two patterns:
+  - **Single-chip generalist** — one ESP32 doing WiFi STA + BLE scan
+    on the same radio. Time-sliced; ~30–70% BLE scan duty cycle when
+    WiFi is busy. Cheap to deploy, good for spatial coverage.
+  - **Paired specialist** — two ESP32s wired together via UART. One
+    BLE-only (~100% BLE duty cycle, WiFi disabled), one WiFi-only
+    (associated to `noahnet`, forwards observations to the Pi).
+    Use for remote out-of-range BLE locations or critical-coverage
+    spots where you need clean RSSI + complete advert capture.
+
+  See `CLAUDE.md` → "Node patterns" for the full rationale and the
+  recommended mix across 10 boards.
+
+## Capabilities
+
+The network is the substrate. Each capability is a deployable workload that
+runs across some subset of nodes.
+
+- [ ] **Distributed BLE sensing** — every ESP32 scans BLE advertisements
+  and publishes observations; the Pi de-duplicates by device address and
+  fuses RSSI across nodes for rough indoor positioning. Real protocol
+  sniffing of established BLE connections is delegated to a separate
+  nRF52840 dongle.
+- [ ] _(more — capabilities added as needed)_
 
 ## Layout
 
 ```
 .
-├── CMakeLists.txt              top-level project
-├── partitions.csv              two OTA slots, 8 MB flash
-├── sdkconfig.defaults          ESP32-S3 + PSRAM + OTA + MicroLink tuning
-├── sdkconfig.credentials.example  copy → sdkconfig.credentials, fill in
-├── external/microlink/         git submodule — github.com/CamM2325/microlink
-├── main/
-│   ├── main.c                  boot → wifi → microlink → httpd
-│   ├── wifi.{c,h}              minimal STA bring-up
-│   ├── http_server.{c,h}       control + OTA endpoint
-│   ├── ota.{c,h}               esp_https_ota wrapper + rollback confirm
-│   └── Kconfig.projbuild       app-level Kconfig (FW_OTA_TOKEN, …)
-└── tools/ota_serve.py          tiny http server for pushing builds
+├── CLAUDE.md                   project memory; read this for full context
+├── README.md                   this file
+├── scripts/
+│   └── bootstrap-glinet-router.sh   Opal one-shot setup (WiFi-WAN, SSID,
+│                                    Tailscale, subnet route)
+├── main/                       aspirational ESP32-S3 firmware (MicroLink
+│                               + on-device Tailscale). Not flashed to
+│                               the current WROOM-32 fleet — see below.
+├── partitions.csv              two OTA slots, 8 MB flash (for the S3 path)
+├── sdkconfig.defaults          ESP-IDF + MicroLink tuning
+├── sdkconfig.credentials.example   copy → sdkconfig.credentials, fill in
+├── external/microlink/         git submodule, not initialized by default
+└── tools/ota_serve.py          HTTP server for pushing OTA builds
 ```
 
-## One-time setup
+## Setting up the Opal
 
-### 1. Install ESP-IDF v5.x or v6.x
+Run the bootstrap script against the Opal once it's powered up with SSH
+access and a Tailscale auth key staged:
 
 ```bash
-mkdir -p ~/esp && cd ~/esp
-git clone --recursive -b release/v5.4 https://github.com/espressif/esp-idf.git
-./esp-idf/install.sh esp32s3
-source ./esp-idf/export.sh   # add this to your shell profile or run per session
+# One-time prereqs (manual)
+ssh-copy-id glinet-new                       # install SSH key on the router
+echo "SSID=entropy-5G"   > ~/repos/.scratch/wifi.txt
+echo "PSK=..."          >> ~/repos/.scratch/wifi.txt
+# generate at https://login.tailscale.com/admin/settings/keys
+echo "tskey-auth-..." > ~/repos/.scratch/tailscale-authkey
+
+# Bootstrap
+./scripts/bootstrap-glinet-router.sh
 ```
 
-### 2. Clone this repo and pull MicroLink
+The script:
+1. Renames the device to `noahnet-router`
+2. Joins `entropy-5G` as upstream (WiFi-as-WAN repeater mode)
+3. Rebroadcasts the new `noahnet` SSID on 2.4 GHz (auto-generated PSK,
+   saved to `~/repos/.scratch/noahnet-wifi.txt`)
+4. Installs the Tailscale package and runs `tailscale up` with the staged
+   authkey, `--advertise-routes=192.168.8.0/24`
+
+After it runs, approve the subnet route in the Tailscale admin console
+(`https://login.tailscale.com/admin/machines`).
+
+## Adding a leaf to noahnet
+
+Any device that joins the `noahnet` SSID with the PSK from
+`~/repos/.scratch/noahnet-wifi.txt` becomes a member. From any tailnet
+peer it'll be reachable by its `192.168.8.x` LAN IP.
+
+For the Pi:
 
 ```bash
-cd ~/repos/noahnet
-git submodule update --init --recursive
+# from the Mac
+NM_KEY=$(awk -F= '/^PSK=/{print $2}' ~/repos/.scratch/noahnet-wifi.txt)
+ssh pi@raspberrypi.local "
+  sudo nmcli connection add type wifi con-name noahnet ifname wlan0 \
+       ssid noahnet 802-11-wireless-security.key-mgmt wpa-psk \
+       wifi-sec.psk '$NM_KEY'
+  sudo nmcli connection up noahnet
+"
 ```
 
-> The submodule isn't pre-populated in this repo — initialize it explicitly so
-> you can decide whether to trust [CamM2325/microlink][microlink] (the
-> Tailscale-compatible client). It's a third-party C implementation of the
-> ts2021 protocol; review the source before flashing it onto devices that sit
-> on your tailnet.
+For an ESP32, set the WiFi credentials in whatever firmware you're flashing
+and reboot. (The `main/` firmware reads `CONFIG_WIFI_SSID` /
+`CONFIG_WIFI_PSK` from `sdkconfig.credentials`.)
 
-### 3. Provide credentials
+## The `main/` firmware
 
-```bash
-cp sdkconfig.credentials.example sdkconfig.credentials
-$EDITOR sdkconfig.credentials   # fill in WiFi, Tailscale auth key, OTA token
-```
+`main/` holds an ESP-IDF firmware for **ESP32-S3** boards that joins the
+Tailscale tailnet directly via [MicroLink][microlink] — bypassing the
+subnet-router model entirely. It is **not** flashed to the current
+WROOM-32 fleet, which lack the PSRAM that MicroLink requires.
 
-Generate a Tailscale auth key at
-<https://login.tailscale.com/admin/settings/keys>. Recommended settings:
-*reusable*, *pre-approved*, and *tagged* (`tag:esp32`) so an attacker who
-extracts the key from flash can't pivot into your tailnet as an arbitrary
-user. Generate the OTA token with `openssl rand -hex 32`.
+Keep this code for when ESP32-S3 hardware arrives, or fork it for the
+WROOM-32 boards by dropping the MicroLink bits and pointing it at the
+Opal-subnet-route reachability model instead.
 
-### 4. Build and flash
-
-```bash
-idf.py set-target esp32s3
-idf.py build
-idf.py -p /dev/cu.usbmodem* flash monitor
-```
-
-You should see the device transition `IDLE → WIFI_WAIT → CONNECTING →
-REGISTERING → CONNECTED` and log its assigned Tailscale IP.
-
-## OTA over Tailscale
-
-From any machine on the tailnet:
-
-```bash
-# 1. Build the new firmware locally
-idf.py build
-
-# 2. Serve build/noahnet.bin over HTTP from your machine
-python3 tools/ota_serve.py
-# → serving … as http://0.0.0.0:8000/noahnet.bin
-
-# 3. In another terminal, tell the device to pull it
-DEVICE=noahnet            # MagicDNS name, or use the 100.x.y.z IP
-TOKEN=$(grep CONFIG_FW_OTA_TOKEN sdkconfig.credentials | cut -d'"' -f2)
-MY_TS_IP=$(tailscale ip -4)
-
-curl -X POST "http://$DEVICE/ota" \
-     -H "X-OTA-Token: $TOKEN" \
-     -d "{\"url\":\"http://$MY_TS_IP:8000/noahnet.bin\"}"
-```
-
-The flow:
-
-1. The device receives the request on its Tailscale IP, validates the token,
-   and queues `fw_ota_pull_and_apply()` on a worker task.
-2. `esp_https_ota` streams the binary from your machine — also over the
-   tailnet — into the inactive OTA slot, verifying the embedded image hash.
-3. The bootloader marks the new slot as *pending verify* and reboots.
-4. On the new boot, after WiFi and Tailscale come back up,
-   `fw_ota_mark_self_ok()` confirms the image. If the new app crashes
-   instead, the bootloader rolls back to the previous slot automatically
-   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`).
-
-WireGuard already encrypts the link, so plain `http://` over the tailnet is
-fine. For pulls from a public URL, use `https://` — the bundled root CA set
-(`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`) covers most public CAs.
-
-## Status endpoint
-
-```bash
-$ curl http://noahnet/
-{"version":"1","build":"May 10 2026 19:53:11","uptime_s":124,"free_heap":156384,
- "tailscale":{"connected":true,"vpn_ip":"100.81.222.42","peers":3}}
-```
-
-## Adding your own code
-
-`main/main.c` is the orchestrator. Drop application logic into a new task
-launched from `app_main` after the HTTP server is up. The control server and
-OTA flow are independent — they keep working even if your app code panics
-inside its own task, which is what makes recovery-by-OTA possible.
-
-To expose application-specific endpoints, register more `httpd_uri_t`
-handlers from `http_server.c`. To gate them behind the same shared secret,
-call `check_token(req)` at the top of the handler.
-
-## Security notes
-
-- **`CONFIG_FW_OTA_TOKEN` is the entire access control story** on the OTA
-  endpoint. Treat it like an SSH key.
-- The HTTP server binds to `0.0.0.0`, so it answers on the LAN IP too. If
-  you want to be paranoid, drop the firewall on the WiFi router or modify
-  `http_server.c` to reject requests whose destination IP isn't in
-  100.64.0.0/10.
-- Tailscale auth keys baked into firmware are recoverable from flash by
-  anyone with physical access. Use *ephemeral* + *tagged* keys with ACLs
-  that limit what an `esp32` node can reach.
+See the section "Why not Tailscale on each ESP32?" in `CLAUDE.md` for
+the full rationale.
 
 [microlink]: https://github.com/CamM2325/microlink
