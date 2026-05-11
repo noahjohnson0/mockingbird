@@ -402,6 +402,19 @@
         <select id="cal-track-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
       </div>
     </div>
+    <button id="ad-start" class="ghost" style="margin-top: 4px; font-size: 11px">auto-detect: walk phone between 4 leaves</button>
+
+    <div id="ad-wizard" style="display:none; margin-top: 10px; padding: 10px; background: #14181f; border: 1px dashed #3a4a6a; border-radius: 6px">
+      <div id="ad-step-text" style="font-size: 12px; color: #cdd1d7; margin-bottom: 8px"></div>
+      <select id="ad-leaf-pick" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
+      <div style="display:flex; gap:6px; margin-top: 8px; align-items: center">
+        <button id="ad-go" style="margin: 0">place phone, then click Go (10 s)</button>
+        <span id="ad-progress" style="color: #79c4ff; font-family: ui-monospace, monospace; font-size: 11px"></span>
+        <button id="ad-cancel" class="ghost" style="margin: 0; padding: 4px 8px; font-size: 10px">cancel</button>
+      </div>
+      <div id="ad-visits" style="font-size: 10px; color: #6b7280; margin-top: 8px; font-family: ui-monospace, monospace"></div>
+      <div id="ad-results" style="margin-top: 8px"></div>
+    </div>
     <div class="row" style="grid-template-columns: 1fr; margin-top: 8px">
       <div>
         <div class="leaf-status">at position (drop to leaf, or enter coords)</div>
@@ -1910,6 +1923,150 @@ calCaptureBtn.addEventListener('click', async () => {
     calCaptureBtn.textContent = 'capture 20 s here';
   }
 });
+
+// ---- auto-detect phone wizard ----
+// User walks their phone to N different leaves, holds for 10s each.
+// Server scores each MAC by how many distinct leaves had that MAC in
+// its top-RSSI list during the corresponding window. The phone's MACs
+// score highest because they followed the user across leaves.
+const adWizard = document.getElementById('ad-wizard');
+const adStepText = document.getElementById('ad-step-text');
+const adLeafPick = document.getElementById('ad-leaf-pick');
+const adGo = document.getElementById('ad-go');
+const adProgress = document.getElementById('ad-progress');
+const adCancel = document.getElementById('ad-cancel');
+const adVisitsEl = document.getElementById('ad-visits');
+const adResultsEl = document.getElementById('ad-results');
+const AD_DURATION_S = 10;
+const AD_NUM_VISITS = 4;
+let adVisits = [];
+let adActive = false;
+
+function adRefreshLeafPick() {
+  // Same content as the calibration leaf-pick but excluding leaves already visited.
+  fetch('/api/leaves').then(r => r.json()).then(leaves => {
+    const positioned = leaves.filter(L => L.x != null);
+    const visitedLeaves = new Set(adVisits.map(v => v.leaf));
+    adLeafPick.innerHTML = positioned.map(L => {
+      const id = L.leaf.replace('mockingbird-', '');
+      const loc = L.location ? ` (${L.location})` : '';
+      const visited = visitedLeaves.has(L.leaf);
+      return `<option value="${L.leaf}" ${visited ? 'disabled' : ''}>at ${id}${loc}${visited ? ' ✓' : ''}</option>`;
+    }).join('');
+  });
+}
+function adRefreshVisits() {
+  if (!adVisits.length) {
+    adVisitsEl.textContent = '';
+    return;
+  }
+  adVisitsEl.innerHTML = adVisits.map((v, i) =>
+    `  visit ${i+1}: ${v.leaf.replace('mockingbird-','')} (${Math.round(v.ts_end - v.ts_start)}s)`
+  ).join('<br>');
+}
+function adSetStep(n) {
+  if (n > AD_NUM_VISITS) {
+    adStepText.textContent = `done — ${AD_NUM_VISITS} visits captured. Hit "Identify" to analyze.`;
+    adGo.textContent = 'Identify phone';
+    adGo.dataset.action = 'identify';
+  } else {
+    adStepText.textContent = `step ${n}/${AD_NUM_VISITS}: pick a leaf, place phone right against it, click Go`;
+    adGo.textContent = `Go (${AD_DURATION_S}s)`;
+    adGo.dataset.action = 'record';
+    adRefreshLeafPick();
+  }
+}
+
+document.getElementById('ad-start').addEventListener('click', () => {
+  adVisits = [];
+  adActive = true;
+  adWizard.style.display = 'block';
+  adResultsEl.innerHTML = '';
+  adRefreshVisits();
+  adSetStep(1);
+});
+adCancel.addEventListener('click', () => {
+  adActive = false;
+  adWizard.style.display = 'none';
+  adVisits = [];
+});
+adGo.addEventListener('click', async () => {
+  if (adGo.dataset.action === 'identify') return adIdentify();
+  const leaf = adLeafPick.value;
+  if (!leaf) return toast('pick a leaf first', 'err');
+  adGo.disabled = true;
+  const ts_start = Date.now() / 1000;
+  // 10s recording, server doesn't need to know — we send the window after.
+  for (let s = AD_DURATION_S; s > 0; s--) {
+    adProgress.textContent = `recording… ${s}s`;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  const ts_end = Date.now() / 1000;
+  adProgress.textContent = '';
+  adVisits.push({ leaf, ts_start, ts_end });
+  adRefreshVisits();
+  adGo.disabled = false;
+  adSetStep(adVisits.length + 1);
+});
+
+async function adIdentify() {
+  adGo.disabled = true;
+  adGo.textContent = 'analyzing…';
+  try {
+    const r = await fetch('/api/autodetect_phone', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visits: adVisits }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'analysis failed', 'err');
+      adGo.disabled = false;
+      adGo.textContent = 'Identify phone';
+      return;
+    }
+    const cands = j.candidates || [];
+    if (!cands.length) {
+      adResultsEl.innerHTML = '<div class="empty" style="font-size:11px">no candidates — try again, longer windows</div>';
+      adGo.disabled = false;
+      return;
+    }
+    // Top candidates with action button
+    adResultsEl.innerHTML = `
+      <div class="leaf-status" style="margin-top:8px">candidates (top by # of distinct leaves):</div>
+      ${cands.slice(0, 6).map(c => `
+        <div style="background: #0c0d10; padding: 6px 10px; margin-top: 4px; border-radius: 4px; display:flex; gap:8px; align-items:center; font-size: 11px">
+          <span style="font-family: ui-monospace, monospace; color: #79c4ff; min-width: 95px">${c.mac.slice(-11)}</span>
+          <span style="flex:1; color: #cdd1d7">${c.track_name || '(no track)'}</span>
+          <span style="color: #6b7280">${c.n_distinct_leaves}/${j.n_visits} leaves · best ${c.best_rssi} dBm</span>
+          <button class="ad-pick" data-mac="${c.mac}" data-tid="${c.track_id || ''}" data-name="${c.track_name || ''}" style="margin:0; padding:3px 8px; font-size:10px">use</button>
+        </div>
+      `).join('')}
+    `;
+    adResultsEl.querySelectorAll('.ad-pick').forEach(b => {
+      b.addEventListener('click', () => {
+        // Force-add this MAC option into the cal-track-select even if no current track
+        const existing = Array.from(calTrackSel.options).find(o => o.value === b.dataset.mac);
+        if (!existing) {
+          const opt = document.createElement('option');
+          opt.value = b.dataset.mac;
+          opt.textContent = `${b.dataset.name || 'phone'} · ${b.dataset.mac.slice(-11)} (auto-detect)`;
+          opt.dataset.tid = b.dataset.tid || '';
+          opt.dataset.name = b.dataset.name || 'phone';
+          calTrackSel.appendChild(opt);
+        }
+        calTrackSel.value = b.dataset.mac;
+        toast(`phone identified: ${b.dataset.name || b.dataset.mac.slice(-11)}`, 'ok');
+        adWizard.style.display = 'none';
+        adActive = false;
+        adVisits = [];
+      });
+    });
+  } catch (e) {
+    toast('network: ' + e.message, 'err');
+    adGo.disabled = false;
+    adGo.textContent = 'Identify phone';
+  }
+}
 
 async function refreshCalAnchorList() {
   try {

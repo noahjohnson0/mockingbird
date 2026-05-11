@@ -632,6 +632,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urlparse(self.path)
+        if url.path == "/api/autodetect_phone":
+            try:
+                msg = json.loads(self._read_body() or "{}")
+                visits = msg.get("visits") or []
+                assert isinstance(visits, list) and len(visits) >= 2
+            except (json.JSONDecodeError, AssertionError):
+                return self._json({"error": "need at least 2 visits"}, 400)
+            db = open_db()
+            # Per-MAC score: each visit, the top-5 MACs by RSSI at the
+            # target leaf each earn a point. After all visits, MACs that
+            # earned points at multiple distinct leaves are the most
+            # likely "your phone" — they followed you between leaves.
+            scores: dict[str, dict] = {}
+            for idx, v in enumerate(visits):
+                try:
+                    leaf = v["leaf"]
+                    ts_start = float(v["ts_start"])
+                    ts_end = float(v["ts_end"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if ts_end <= ts_start:
+                    continue
+                rows = db.execute(
+                    "SELECT mac, MAX(rssi) FROM obs INDEXED BY idx_obs_leaf_ts "
+                    "WHERE leaf = ? AND ts >= ? AND ts <= ? "
+                    "GROUP BY mac ORDER BY MAX(rssi) DESC LIMIT 8",
+                    (leaf, ts_start, ts_end),
+                ).fetchall()
+                for rank, (mac, rssi) in enumerate(rows):
+                    s = scores.setdefault(mac, {
+                        "mac": mac, "n_visits": 0, "best_rssi": -200,
+                        "per_visit": [], "leaves_seen": set(),
+                    })
+                    s["n_visits"] += 1
+                    s["best_rssi"] = max(s["best_rssi"], rssi)
+                    s["per_visit"].append({"visit_idx": idx, "leaf": leaf, "rssi": rssi, "rank": rank + 1})
+                    s["leaves_seen"].add(leaf)
+            # Annotate with track_name if we know one
+            try:
+                m2t = mockingbird_tracks.store.mac_to_track
+                tracks = mockingbird_tracks.store.tracks
+                for mac, s in scores.items():
+                    tid = m2t.get(mac)
+                    if tid and tid in tracks:
+                        s["track_name"] = tracks[tid].name
+                        s["track_id"] = tid
+            except Exception:
+                pass
+            # Convert leaves_seen → distinct count, drop the set (JSON-incompatible)
+            ranked = []
+            for mac, s in scores.items():
+                s["n_distinct_leaves"] = len(s["leaves_seen"])
+                del s["leaves_seen"]
+                ranked.append(s)
+            # Best phones: appeared near the most distinct leaves, ranked
+            # secondarily by best RSSI (closer = more likely the device).
+            ranked.sort(key=lambda x: (-x["n_distinct_leaves"], -x["best_rssi"]))
+            return self._json({"candidates": ranked[:10], "n_visits": len(visits)})
+
         if url.path == "/api/calibrate_at":
             try:
                 msg = json.loads(self._read_body() or "{}")
