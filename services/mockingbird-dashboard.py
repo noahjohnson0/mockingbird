@@ -378,15 +378,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             devices = []
             cal = CALIBRATION
             method = "centroid"
-            # Bounds for multilateration sanity-check: room + 1m margin.
+            # Bounds for multilat sanity check.  These do NOT clip "outside
+            # the room" — BLE has real range past walls, and a device 3m
+            # outside a wall is legitimate signal.  These bounds only catch
+            # math explosions (linearization failures producing 1km+
+            # coordinates).  Set to "room + 15m on every side" — generous
+            # enough that any plausible BLE pickup is allowed through, but
+            # tight enough to reject the 10^3 m blowups.
             room_row = db.execute(
                 "SELECT width, depth, height FROM room WHERE id = 1"
             ).fetchone()
             if room_row:
                 rw, rd, rh = room_row
-                multilat_bounds = (-1.0, rw + 1.0, -1.0, rd + 1.0, -0.5, rh + 0.5)
+                EXTRA = 15.0
+                multilat_bounds = (-EXTRA, rw + EXTRA, -EXTRA, rd + EXTRA, -EXTRA, rh + EXTRA)
             else:
-                multilat_bounds = (-5.0, 15.0, -5.0, 15.0, -1.0, 4.0)
+                multilat_bounds = (-20.0, 20.0, -20.0, 20.0, -10.0, 10.0)
             for mac, hits in by_mac.items():
                 if len(hits) < 2:
                     continue  # need ≥2 positioned-leaf hits for any position confidence
@@ -429,10 +436,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "pos_method": pos_method,
                 })
             devices.sort(key=lambda d: d["rssi_max"], reverse=True)
-            # Push through the track tracker — adds track_id, track_name,
-            # track_age_s, track_macs, and a position-history trail to
-            # each device entry.
-            tracked = mockingbird_tracks.store.step(devices, now=now)
+            # Push through the track tracker. When calibrated, the
+            # tracker re-positions each device via multilateration using
+            # the *track's* accumulated fingerprint (which covers more
+            # leaves than any single short-lived MAC's per-poll window).
+            tracked = mockingbird_tracks.store.step(
+                devices, now=now,
+                calibration=cal, positions=positions,
+                multilat_bounds=multilat_bounds,
+            )
             return self._json({
                 "as_of": now,
                 "window_s": LIVE_WINDOW_S,
