@@ -258,6 +258,17 @@
     font-size: 9px; color: #6b7280; text-transform: uppercase;
     letter-spacing: 0.06em; margin-top: 6px; padding-left: 2px;
   }
+  /* view cube widget — clickable 3D cube in the corner */
+  #view-cube {
+    position: absolute; top: 14px; right: 14px;
+    width: 110px; height: 110px; z-index: 4;
+    cursor: grab; border-radius: 6px;
+    background: rgba(20,22,26,0.45);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border: 1px solid rgba(42,46,54,0.6);
+  }
+  #view-cube:active { cursor: grabbing; }
+  #view-cube canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -269,27 +280,19 @@
     <div class="spinner"></div>
     <div class="stage" id="scene-loader-stage">loading 3D engine…</div>
   </div>
-  <div id="scene-busy"><div class="spinner sm"></div></div>
+  <div id="scene-busy" style="top:auto; bottom:12px; right:12px"><div class="spinner sm"></div></div>
   <div id="view-controls">
     <div class="vc-label">camera</div>
     <div class="vc-row">
       <button data-cam="persp" class="active" title="Perspective camera">3D</button>
       <button data-cam="ortho" title="Orthographic camera (no perspective foreshortening)">ortho</button>
     </div>
-    <div class="vc-label">view</div>
+    <div class="vc-label">quick view</div>
     <div class="vc-row">
-      <button data-view="iso"    title="Isometric (default)">iso</button>
-      <button data-view="top"    title="Top-down (X-Y plane)">top</button>
-    </div>
-    <div class="vc-row">
-      <button data-view="front"  title="Front (X-Z plane, +Y forward)">front</button>
-      <button data-view="back"   title="Back (X-Z plane, -Y forward)">back</button>
-    </div>
-    <div class="vc-row">
-      <button data-view="left"   title="Left side (Y-Z plane, +X forward)">left</button>
-      <button data-view="right"  title="Right side (Y-Z plane, -X forward)">right</button>
+      <button data-view="iso" title="Isometric">iso</button>
     </div>
   </div>
+  <div id="view-cube" title="Click a face to snap that view. Drag to orbit."></div>
 </div>
 <div id="side">
   <div class="tabs">
@@ -545,6 +548,107 @@ function snapView(name) {
     if (t < 1) requestAnimationFrame(step);
   }
   step();
+}
+
+// ---- view cube widget ----
+// A small 3D cube in the corner with labeled clickable faces.
+// Rotation tracks the main camera; clicking a face snaps the main camera
+// so that face is what you're looking at.
+//
+// Three.js cube material index → face direction → room view name:
+//   0  +X  right
+//   1  -X  left
+//   2  +Y  top      (Y-up convention)
+//   3  -Y  bottom   (not in our snapView; we treat as top-down upside-down)
+//   4  +Z  back     (room y → three.z, so +Z is "back of room")
+//   5  -Z  front
+const vcContainer = document.getElementById('view-cube');
+const vcRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+vcRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+vcRenderer.setSize(110, 110);
+vcContainer.appendChild(vcRenderer.domElement);
+
+const vcScene = new THREE.Scene();
+const vcCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 10);
+vcCamera.position.set(0, 0, 3.4);
+vcScene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const vcLight = new THREE.DirectionalLight(0xffffff, 0.8);
+vcLight.position.set(2, 2, 3);
+vcScene.add(vcLight);
+
+function makeFaceTexture(label, isTop = false) {
+  // Crisp text on a flat-colored face. 256² is plenty at 110-px display.
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  // Subtle bluish-grey face
+  g.fillStyle = '#2a3340';
+  g.fillRect(0, 0, 256, 256);
+  // Inner highlight border for "tile" feel
+  g.strokeStyle = '#4a5b78';
+  g.lineWidth = 6;
+  g.strokeRect(6, 6, 244, 244);
+  g.fillStyle = '#e6e9ef';
+  g.font = '700 56px -apple-system, "SF Pro Display", system-ui, sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(label, 128, 138);
+  // Subtle accent stripe along the bottom for the top face so you can
+  // distinguish it from bottom at a glance even when rotated.
+  if (isTop) {
+    g.fillStyle = '#1d6fef';
+    g.fillRect(0, 232, 256, 6);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Face order matches BoxGeometry: +X, -X, +Y, -Y, +Z, -Z
+const vcFaceLabels = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'BACK', 'FRONT'];
+const vcFaceViews  = ['right', 'left',  'top', 'top',    'back', 'front'];
+const vcMaterials = vcFaceLabels.map((label, i) => new THREE.MeshStandardMaterial({
+  map: makeFaceTexture(label, i === 2),
+  roughness: 0.6, metalness: 0.1,
+}));
+const vcCube = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 1.2), vcMaterials);
+vcScene.add(vcCube);
+
+// Click → raycast → snap view (or invert for the bottom click → "top")
+const vcRaycaster = new THREE.Raycaster();
+const vcMouse = new THREE.Vector2();
+vcContainer.addEventListener('click', (ev) => {
+  const rect = vcContainer.getBoundingClientRect();
+  vcMouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  vcMouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  vcRaycaster.setFromCamera(vcMouse, vcCamera);
+  const hits = vcRaycaster.intersectObject(vcCube, false);
+  if (!hits.length) return;
+  const faceIdx = Math.floor(hits[0].face.materialIndex);  // 0..5
+  const view = vcFaceViews[faceIdx];
+  snapView(view);
+});
+
+// Per-frame sync of the cube's orientation to the main camera's view.
+// We want the face that the main camera is closest to to be the one we
+// see in the widget. Achieved by giving the cube the inverse of the
+// camera's quaternion (transformed into "looking from camera position
+// toward target" space).
+const _vcDir = new THREE.Vector3();
+const _vcQ = new THREE.Quaternion();
+const _vcUp = new THREE.Vector3(0, 1, 0);
+function tickViewCube() {
+  // direction from target to camera, normalized
+  _vcDir.copy(camera.position).sub(controls.target).normalize();
+  // Build a quaternion that orients a +Z-facing object toward _vcDir.
+  // Then invert so the cube rotates the OPPOSITE way (we want to see
+  // the face that's "near the camera in scene space"); rotating the
+  // cube opposite gives that visual.
+  const m = new THREE.Matrix4().lookAt(_vcDir, new THREE.Vector3(0, 0, 0), _vcUp);
+  _vcQ.setFromRotationMatrix(m);
+  vcCube.quaternion.copy(_vcQ).invert();
+  vcRenderer.render(vcScene, vcCamera);
 }
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
@@ -878,6 +982,7 @@ function loop() {
   tickDeviceAnimation();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
+  tickViewCube();
   if (!_firstFrameDrawn) {
     _firstFrameDrawn = true;
     setLoaderStage('fetching leaves…');
