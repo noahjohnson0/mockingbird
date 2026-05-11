@@ -135,15 +135,16 @@
   }
   /* live pane: name editor */
   .dev-row input.dev-name {
-    background: transparent; border: 0; color: #79c4ff;
-    font-family: inherit; font-size: 11px; padding: 1px 4px;
-    width: 100px; outline: none; border-bottom: 1px dashed #2a2e36;
+    background: transparent; border: 0; color: #e6e9ef;
+    font-family: inherit; font-size: 12px; padding: 1px 4px;
+    flex: 1; min-width: 0; outline: none;
+    border-bottom: 1px dashed transparent;
     border-radius: 0;
   }
-  .dev-row input.dev-name::placeholder { color: #4b525c; font-style: italic; }
-  .dev-row input.dev-name:focus { border-bottom-color: #1d6fef; color: #79c4ff; }
+  .dev-row input.dev-name:hover  { border-bottom-color: #2a2e36; }
+  .dev-row input.dev-name:focus  { border-bottom-color: #1d6fef; color: #79c4ff; }
+  .dev-row.named input.dev-name  { color: #79c4ff; font-weight: 600; }
   .dev-row.named { background: #1a2230; border-color: #2a3a55; }
-  .dev-row.named .dev-mac { color: #6b7280; font-size: 10px; }
   /* live-pane toolbar (toggles row) */
   .live-toolbar {
     display: flex; gap: 12px; align-items: center;
@@ -298,12 +299,12 @@
   </div>
 
   <div class="live-toolbar">
-    <label title="Show floating labels for every device. Off = only named devices show labels (clean view).">
+    <label title="Show floating labels next to every device sphere. Names are auto-assigned by MAC; you can override any via the sidebar inputs.">
       <input type="checkbox" id="opt-show-all-labels">
-      Show all labels
+      Show labels in 3D
     </label>
     <div class="spacer"></div>
-    <button id="opt-clear-names" title="Forget all device nicknames">clear names</button>
+    <button id="opt-clear-names" title="Drop all manual overrides so devices revert to their auto-assigned names">reset overrides</button>
   </div>
 
   <h2>devices</h2>
@@ -558,32 +559,54 @@ function macColor(mac) {
   return new THREE.Color().setHSL(hue / 360, 0.7, 0.6);
 }
 
-// ---- device nickname store (localStorage) ----
-// Lets the user assign a short name like "phone" / "watch" / "airpods" to
-// a given MAC. Stored in localStorage so refreshes preserve them. Apple
-// MAC rotation means names age out every ~15 min — that's fine, the user
-// can just rename the new MAC when it appears.
+// ---- device names ----
+// Every MAC gets an auto-assigned 2-word codename ("ruby kestrel",
+// "frost owl") deterministic from the MAC, so the same address always
+// shows the same name. User can override per-MAC via the sidebar input;
+// overrides are persisted to localStorage. Auto-names are NOT persisted —
+// they're regenerated identically on every load from the hash. 16 × 32 =
+// 512 combos, so collisions are rare among the ≲30 visible devices.
+const ADJECTIVES = [
+  'ruby','jade','ash','copper','slate','dusk','dawn','amber',
+  'frost','ember','silver','pearl','onyx','rust','smoke','rose',
+];
+const BIRDS = [
+  'auk','jay','owl','dove','hawk','wren','lark','kite',
+  'gull','tern','crow','robin','raven','finch','swift','snipe',
+  'ibis','egret','heron','plover','pipit','vireo','junco','oriole',
+  'thrush','merlin','falcon','magpie','sparrow','swallow','shrike','condor',
+];
+function hashStr(s) {
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+function autoName(mac) {
+  const a = ADJECTIVES[Math.abs(hashStr(mac)) % ADJECTIVES.length];
+  const b = BIRDS[Math.abs(hashStr(mac + ':bird')) % BIRDS.length];
+  return `${a} ${b}`;
+}
 const NAMES_KEY = 'mockingbird.deviceNames';
 const SHOW_ALL_KEY = 'mockingbird.showAllLabels';
-let macNames = {};
+let macNames = {};  // user overrides only
 try { macNames = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}'); }
 catch { macNames = {}; }
-let showAllLabels = localStorage.getItem(SHOW_ALL_KEY) === 'true';
+// Default labels ON now that every device has a short readable name.
+let showAllLabels = localStorage.getItem(SHOW_ALL_KEY);
+showAllLabels = showAllLabels == null ? true : showAllLabels === 'true';
 
-function getName(mac) { return macNames[mac] || ''; }
+function getName(mac) { return macNames[mac] || autoName(mac); }
+function isUserNamed(mac) { return !!macNames[mac]; }
 function setName(mac, name) {
   name = (name || '').trim().slice(0, 24);
-  if (name) macNames[mac] = name;
-  else delete macNames[mac];
+  if (name && name !== autoName(mac)) macNames[mac] = name;
+  else delete macNames[mac];  // empty or "same as auto" → revert to auto
   localStorage.setItem(NAMES_KEY, JSON.stringify(macNames));
 }
-function deviceLabelText(mac, rssi, nLeaves) {
-  const name = getName(mac);
-  if (name) return `${name} · ${rssi} dBm`;
-  return `${mac.slice(-8)} · ${rssi} dBm · ${nLeaves}L`;
+function deviceLabelText(mac, rssi /*, nLeaves */) {
+  return `${getName(mac)} · ${rssi} dBm`;
 }
-function deviceLabelShouldShow(mac) {
-  return showAllLabels || !!getName(mac);
+function deviceLabelShouldShow(/* mac */) {
+  return showAllLabels;
 }
 
 function ensureDeviceSphere(mac) {
@@ -617,6 +640,19 @@ function ensureDeviceSphere(mac) {
   return entry;
 }
 
+function styleLabelForMac(labelEl, mac) {
+  // User overrides get the blue accent; auto-names stay neutral.
+  if (isUserNamed(mac)) {
+    labelEl.style.borderColor = '#1d6fef';
+    labelEl.style.color = '#79c4ff';
+    labelEl.style.fontWeight = '600';
+  } else {
+    labelEl.style.borderColor = '#2a2e36';
+    labelEl.style.color = '#e6e9ef';
+    labelEl.style.fontWeight = '';
+  }
+}
+
 function applyLiveDevices(devices) {
   const now = performance.now();
   for (const d of devices) {
@@ -626,18 +662,9 @@ function applyLiveDevices(devices) {
     entry.lastSeen = now;
     entry.rssi = d.rssi_max;
     entry.nLeaves = d.n_leaves;
-    entry.labelEl.textContent = deviceLabelText(d.mac, d.rssi_max, d.n_leaves);
-    entry.labelEl.style.display = deviceLabelShouldShow(d.mac) ? '' : 'none';
-    // Brighter style for named devices so they stand out
-    if (getName(d.mac)) {
-      entry.labelEl.style.borderColor = '#1d6fef';
-      entry.labelEl.style.color = '#79c4ff';
-      entry.labelEl.style.fontWeight = '600';
-    } else {
-      entry.labelEl.style.borderColor = '#2a2e36';
-      entry.labelEl.style.color = '#e6e9ef';
-      entry.labelEl.style.fontWeight = '';
-    }
+    entry.labelEl.textContent = deviceLabelText(d.mac, d.rssi_max);
+    entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
+    styleLabelForMac(entry.labelEl, d.mac);
   }
 }
 
@@ -646,17 +673,9 @@ function applyLiveDevices(devices) {
 // avoids waiting for the next poll to see the change.
 function refreshDeviceLabels() {
   for (const [mac, e] of deviceByMac) {
-    e.labelEl.textContent = deviceLabelText(mac, e.rssi, e.nLeaves || 0);
-    e.labelEl.style.display = deviceLabelShouldShow(mac) ? '' : 'none';
-    if (getName(mac)) {
-      e.labelEl.style.borderColor = '#1d6fef';
-      e.labelEl.style.color = '#79c4ff';
-      e.labelEl.style.fontWeight = '600';
-    } else {
-      e.labelEl.style.borderColor = '#2a2e36';
-      e.labelEl.style.color = '#e6e9ef';
-      e.labelEl.style.fontWeight = '';
-    }
+    e.labelEl.textContent = deviceLabelText(mac, e.rssi);
+    e.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
+    styleLabelForMac(e.labelEl, mac);
   }
 }
 
@@ -973,15 +992,14 @@ function ensureLiveRow(d) {
   let row = liveRowByMac.get(d.mac);
   if (!row) {
     const col = '#' + macColor(d.mac).getHexString();
-    const shortMac = d.mac.slice(-11);
     const name = getName(d.mac);
     row = document.createElement('div');
-    row.className = 'dev-row fadein' + (name ? ' named' : '');
+    row.className = 'dev-row fadein' + (isUserNamed(d.mac) ? ' named' : '');
     row.dataset.mac = d.mac;
+    row.title = `MAC ${d.mac}`;  // hover to see the address if you ever need to
     row.innerHTML = `
       <span class="dev-dot" style="background:${col}"></span>
-      <input type="text" class="dev-name" placeholder="name…" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
-      <span class="dev-mac">${shortMac}</span>
+      <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
       <span class="dev-rssi"></span>
       <span class="dev-n"></span>
     `;
@@ -991,7 +1009,9 @@ function ensureLiveRow(d) {
     const save = debounce(() => {
       const v = inp.value.trim();
       setName(d.mac, v);
-      row.classList.toggle('named', !!v);
+      row.classList.toggle('named', isUserNamed(d.mac));
+      // If they cleared it, snap the input back to the auto-name.
+      if (!v) inp.value = getName(d.mac);
       refreshDeviceLabels();
     }, 350);
     inp.addEventListener('input', save);
@@ -1089,17 +1109,18 @@ showAllEl.addEventListener('change', () => {
 });
 document.getElementById('opt-clear-names').addEventListener('click', () => {
   const n = Object.keys(macNames).length;
-  if (!n) return toast('no names to clear', 'warn');
-  if (!confirm(`clear ${n} device name${n === 1 ? '' : 's'}?`)) return;
+  if (!n) return toast('no overrides to reset', 'warn');
+  if (!confirm(`reset ${n} manual name override${n === 1 ? '' : 's'}?`)) return;
   macNames = {};
   localStorage.setItem(NAMES_KEY, '{}');
-  // Clear sidebar inputs in place
-  liveListEl.querySelectorAll('input.dev-name').forEach(inp => {
-    inp.value = '';
-    inp.closest('.dev-row')?.classList.remove('named');
+  // Snap sidebar inputs back to their auto-names.
+  liveListEl.querySelectorAll('.dev-row').forEach(row => {
+    const inp = row.querySelector('input.dev-name');
+    if (inp) inp.value = getName(row.dataset.mac);
+    row.classList.remove('named');
   });
   refreshDeviceLabels();
-  toast(`cleared ${n} name${n === 1 ? '' : 's'}`, 'warn');
+  toast(`reset ${n} override${n === 1 ? '' : 's'}`, 'warn');
 });
 </script>
 </body>

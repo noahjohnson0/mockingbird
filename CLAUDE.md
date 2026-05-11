@@ -296,19 +296,23 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 - **Mac:** on Mockingbird at `192.168.8.134`, sees Pi as a direct
   WireGuard peer (14ms RTT, no DERP relay). Tailscale ed25519 SSH key
   installed on both Pi and Opal.
-- **ESP32 leaves (running v0.3.0-stream firmware):**
+- **ESP32 leaves (running v0.3.1-stream firmware, 8 total):**
   - `mockingbird-4ce184` (MAC `8c:94:df:4c:e1:84`) — last seen `192.168.8.244`
   - `mockingbird-4c0bdc` (MAC `8c:94:df:4c:0b:dc`) — last seen `192.168.8.196`
   - `mockingbird-4c36ec` (MAC `8c:94:df:4c:36:ec`) — last seen `192.168.8.219`
   - `mockingbird-4db204` (MAC `8c:94:df:4d:b2:04`) — last seen `192.168.8.168`
-  - All four **stream BLE observations as newline-delimited JSON over TCP
+  - `mockingbird-4ce1d8` (MAC `8c:94:df:4c:e1:d8`) — last seen `192.168.8.178` *(flashed 2026-05-11)*
+  - `mockingbird-4ceb7c` (MAC `8c:94:df:4c:eb:7c`) — last seen `192.168.8.126` *(flashed 2026-05-11)*
+  - `mockingbird-92838c` (MAC `30:76:f5:92:83:8c`) — last seen `192.168.8.204` *(flashed 2026-05-11; Espressif OUI, not AITRIP — different batch)*
+  - `mockingbird-4d4384` (MAC `8c:94:df:4d:43:84`) — last seen `192.168.8.107` *(flashed 2026-05-11)*
+  - All eight **stream BLE observations as newline-delimited JSON over TCP
     to `mockingbird-pi:9001`** (the collector). Per-leaf state on-device
     is now just a 64-entry queue + counters, no accumulation, no OOM.
-    Heap stays at ~120 KB free under continuous heavy scanning.
+    Heap stays at ~110–125 KB free under continuous heavy scanning.
   - HTTP API on `:80` is minimal: `GET /`, `GET /version`, `POST /restart`.
     `/scan/*` is gone (the Pi has every observation continuously).
   - ArduinoOTA on UDP 3232 still works; the BLE scan pauses during OTA.
-  - 6 unflashed AITRIP boards remain in the pack.
+  - ~2 unflashed AITRIP boards remain in the pack (started with 10; 8 deployed; 1 of the deployed 8 is the non-AITRIP Espressif unit).
 - One unit on entropy at `192.168.0.172` (MAC `58:e6:c5:6f:4a:dc`) with old
   pre-mockingbird firmware — needs reflash to join the mesh.
 - ESP32 firmware in `main/`: never been built (ESP-IDF not installed,
