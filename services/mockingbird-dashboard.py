@@ -20,6 +20,10 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Sibling module on the Pi — same directory as this file.
+sys.path.insert(0, str(Path(__file__).parent))
+import mockingbird_tracks  # noqa: E402
+
 DB_PATH = Path.home() / "mockingbird" / "observations.sqlite"
 HTML_PATH = Path(__file__).parent / "dashboard.html"
 PORT = 8080
@@ -380,7 +384,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "leaves": leaves_seen,
                 })
             devices.sort(key=lambda d: d["rssi_max"], reverse=True)
-            return self._json({"as_of": now, "window_s": LIVE_WINDOW_S, "devices": devices})
+            # Push through the track tracker — adds track_id, track_name,
+            # track_age_s, track_macs, and a position-history trail to
+            # each device entry.
+            tracked = mockingbird_tracks.store.step(devices, now=now)
+            return self._json({"as_of": now, "window_s": LIVE_WINDOW_S, "devices": tracked})
 
         if url.path == "/api/room":
             db = open_db()

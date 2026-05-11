@@ -790,26 +790,30 @@ function fit() {
 addEventListener('resize', fit);
 fit();
 
-// ---- live device cluster rendering ----
-// Each detected device is a small glowing sphere; positions interpolate
-// smoothly toward their server-reported targets every frame (lerp at
-// ~0.06/frame ≈ visible smoothing over ~0.7 s at 60 fps).
+// ---- live track rendering ----
+// Server gives us tracks (persistent identities that survive MAC
+// rotation). Each track is a glowing sphere + a fading polyline trail
+// behind it. Positions interpolate smoothly toward server targets.
 const deviceGroup = new THREE.Group();
+const trailGroup = new THREE.Group();
 scene.add(deviceGroup);
-const deviceByMac = new Map();  // mac → { sphere, target: Vector3, labelEl, lastSeen, rssi }
+scene.add(trailGroup);
+// keyed by track_id, not MAC, so rotation doesn't break identity
+const deviceByTrack = new Map();  // track_id → { sphere, target, labelEl, ... }
 const LERP_RATE = 0.08;
 const STALE_AFTER_MS = 6000;  // start fading
 const REMOVE_AFTER_MS = 12000;
 
-// Color is a hash of the MAC so a given (rotated) address stays the same
-// hue while it's alive, and different devices look distinct.
-function macColor(mac) {
+// Color is hashed from the track_id so a track keeps its color across
+// MAC rotations. (For unknown contexts we still use the MAC-hash fn —
+// kept for backward compat.)
+function hashHue(s) {
   let h = 0;
-  for (let i = 0; i < mac.length; i++) h = (h * 31 + mac.charCodeAt(i)) | 0;
-  // Map hash → hue 0..360, keep saturation/lightness fixed for legibility
-  const hue = ((h % 360) + 360) % 360;
-  return new THREE.Color().setHSL(hue / 360, 0.7, 0.6);
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return ((h % 360) + 360) % 360;
 }
+function trackColor(track_id) { return new THREE.Color().setHSL(hashHue(track_id) / 360, 0.7, 0.6); }
+function macColor(mac) { return new THREE.Color().setHSL(hashHue(mac) / 360, 0.7, 0.6); }
 
 // ---- device names ----
 // Every MAC gets an auto-assigned 2-word codename ("ruby kestrel",
@@ -846,32 +850,40 @@ catch { macNames = {}; }
 let showAllLabels = localStorage.getItem(SHOW_ALL_KEY);
 showAllLabels = showAllLabels == null ? true : showAllLabels === 'true';
 
-function getName(mac) { return macNames[mac] || autoName(mac); }
-function isUserNamed(mac) { return !!macNames[mac]; }
-function setName(mac, name) {
+// Track names come from the server (server-side TrackStore uses the same
+// adjective+bird scheme keyed off track_id). User overrides are stored
+// per track_id in localStorage and survive page reloads. The autoName()
+// + macNames key are kept around for backward compat in case some code
+// path still passes a MAC, but the primary path now uses track names.
+function getName(track) {
+  // `track` can be a full device dict (with track_id + track_name) or a MAC.
+  if (typeof track === 'object' && track) {
+    return macNames[track.track_id] || track.track_name || autoName(track.mac || '');
+  }
+  return macNames[track] || autoName(track || '');
+}
+function isUserNamed(key) { return !!macNames[key]; }
+function setName(key, name) {
   name = (name || '').trim().slice(0, 24);
-  if (name && name !== autoName(mac)) macNames[mac] = name;
-  else delete macNames[mac];  // empty or "same as auto" → revert to auto
+  if (name) macNames[key] = name;
+  else delete macNames[key];
   localStorage.setItem(NAMES_KEY, JSON.stringify(macNames));
 }
-function deviceLabelText(mac, rssi /*, nLeaves */) {
-  return `${getName(mac)} · ${rssi} dBm`;
+function deviceLabelText(deviceOrMac, rssi) {
+  return `${getName(deviceOrMac)} · ${rssi} dBm`;
 }
-function deviceLabelShouldShow(/* mac */) {
-  return showAllLabels;
-}
+function deviceLabelShouldShow() { return showAllLabels; }
 
-function ensureDeviceSphere(mac) {
-  let entry = deviceByMac.get(mac);
+function ensureTrackEntry(track_id) {
+  let entry = deviceByTrack.get(track_id);
   if (entry) return entry;
-  const color = macColor(mac);
+  const color = trackColor(track_id);
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(0.08, 16, 12),
     new THREE.MeshStandardMaterial({
       color, emissive: color, emissiveIntensity: 0.6, transparent: true, opacity: 1.0,
     })
   );
-  // soft halo using a slightly larger sprite-like sphere
   const halo = new THREE.Mesh(
     new THREE.SphereGeometry(0.18, 16, 12),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false })
@@ -887,14 +899,28 @@ function ensureDeviceSphere(mac) {
   label.position.set(0, 0.18, 0);
   sphere.add(label);
   deviceGroup.add(sphere);
-  entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0, rssi: -100, color, halo };
-  deviceByMac.set(mac, entry);
+
+  // Trail: a single Line geometry that we resize each update. Vertex
+  // colors fade older points toward transparency (alpha encoded as
+  // material opacity — three.Line supports vertex colors but not
+  // vertex-alpha; we approximate by darkening toward black at the tail).
+  const trailGeom = new THREE.BufferGeometry();
+  trailGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  trailGeom.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(0), 3));
+  const trailMat = new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9,
+  });
+  const trail = new THREE.Line(trailGeom, trailMat);
+  trailGroup.add(trail);
+
+  entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0,
+            rssi: -100, color, halo, trail, trailGeom };
+  deviceByTrack.set(track_id, entry);
   return entry;
 }
 
-function styleLabelForMac(labelEl, mac) {
-  // User overrides get the blue accent; auto-names stay neutral.
-  if (isUserNamed(mac)) {
+function styleLabelForKey(labelEl, key) {
+  if (isUserNamed(key)) {
     labelEl.style.borderColor = '#1d6fef';
     labelEl.style.color = '#79c4ff';
     labelEl.style.fontWeight = '600';
@@ -905,40 +931,76 @@ function styleLabelForMac(labelEl, mac) {
   }
 }
 
+// Compress server trail (array of {ts,x,y,z}) into Float32Array buffers
+// for the Line geometry. Color attribute fades from full color (head) to
+// near-black (tail) so it looks like a comet trail.
+function updateTrailGeometry(entry, trail, color) {
+  if (!trail || trail.length < 2) {
+    entry.trailGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    entry.trailGeom.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(0), 3));
+    entry.trailGeom.attributes.position.needsUpdate = true;
+    return;
+  }
+  const n = trail.length;
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  // Server stores oldest first; head of the trail = newest point.
+  for (let i = 0; i < n; i++) {
+    const p = trail[i];
+    // room (x, y, z) → three (x, z, y)
+    pos[i * 3 + 0] = p.x;
+    pos[i * 3 + 1] = p.z;
+    pos[i * 3 + 2] = p.y;
+    // Fade: oldest gets factor 0.05, newest gets 1.0
+    const f = 0.05 + 0.95 * (i / (n - 1));
+    col[i * 3 + 0] = color.r * f;
+    col[i * 3 + 1] = color.g * f;
+    col[i * 3 + 2] = color.b * f;
+  }
+  entry.trailGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  entry.trailGeom.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+  entry.trailGeom.attributes.position.needsUpdate = true;
+  entry.trailGeom.attributes.color.needsUpdate = true;
+  entry.trailGeom.computeBoundingSphere();
+}
+
 function applyLiveDevices(devices) {
   const now = performance.now();
   for (const d of devices) {
-    const entry = ensureDeviceSphere(d.mac);
-    // room (x, y, z) → three (x, z, y)
+    const entry = ensureTrackEntry(d.track_id);
     entry.target.set(d.x, d.z, d.y);
     entry.lastSeen = now;
     entry.rssi = d.rssi_max;
     entry.nLeaves = d.n_leaves;
-    entry.labelEl.textContent = deviceLabelText(d.mac, d.rssi_max);
+    entry.lastDevice = d;
+    entry.labelEl.textContent = deviceLabelText(d, d.rssi_max);
     entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
-    styleLabelForMac(entry.labelEl, d.mac);
+    styleLabelForKey(entry.labelEl, d.track_id);
+    updateTrailGeometry(entry, d.trail, entry.color);
   }
 }
 
-// Walk the existing device meshes and refresh label visibility + text.
-// Used when the user toggles "show all labels" or types a new name —
-// avoids waiting for the next poll to see the change.
+// Walk the existing track meshes and refresh label visibility + text.
+// Called when "show labels" is toggled or a name override is typed —
+// avoids waiting for the next poll for the change to take effect.
 function refreshDeviceLabels() {
-  for (const [mac, e] of deviceByMac) {
-    e.labelEl.textContent = deviceLabelText(mac, e.rssi);
+  for (const [tid, e] of deviceByTrack) {
+    if (e.lastDevice) e.labelEl.textContent = deviceLabelText(e.lastDevice, e.rssi);
     e.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
-    styleLabelForMac(e.labelEl, mac);
+    styleLabelForKey(e.labelEl, tid);
   }
 }
 
 function tickDeviceAnimation() {
   const now = performance.now();
-  for (const [mac, e] of deviceByMac) {
+  for (const [tid, e] of deviceByTrack) {
     e.sphere.position.lerp(e.target, LERP_RATE);
     const age = now - e.lastSeen;
     if (age > REMOVE_AFTER_MS) {
       deviceGroup.remove(e.sphere);
-      deviceByMac.delete(mac);
+      trailGroup.remove(e.trail);
+      e.trailGeom.dispose();
+      deviceByTrack.delete(tid);
       continue;
     }
     if (age > STALE_AFTER_MS) {
@@ -946,10 +1008,12 @@ function tickDeviceAnimation() {
       e.sphere.material.opacity = fade;
       e.halo.material.opacity = fade * 0.18;
       e.labelEl.style.opacity = fade;
+      e.trail.material.opacity = fade * 0.9;
     } else {
       e.sphere.material.opacity = 1;
       e.halo.material.opacity = 0.18;
       e.labelEl.style.opacity = 1;
+      e.trail.material.opacity = 0.9;
     }
   }
 }
@@ -1320,43 +1384,44 @@ const liveAsofEl = document.getElementById('live-asof');
 const liveListEl = document.getElementById('live-list');
 
 let _liveFirstPollDone = false;
-const liveRowByMac = new Map();  // mac → row <div> in the sidebar
+const liveRowByTrack = new Map();  // track_id → row <div> in the sidebar
 
 function ensureLiveRow(d) {
-  let row = liveRowByMac.get(d.mac);
+  let row = liveRowByTrack.get(d.track_id);
   if (!row) {
-    const col = '#' + macColor(d.mac).getHexString();
-    const name = getName(d.mac);
+    const col = '#' + trackColor(d.track_id).getHexString();
+    const name = getName(d);  // server track_name unless user has overridden
+    const macList = (d.track_macs || [d.mac]).join('\n');
     row = document.createElement('div');
-    row.className = 'dev-row fadein' + (isUserNamed(d.mac) ? ' named' : '');
-    row.dataset.mac = d.mac;
-    row.title = `MAC ${d.mac}`;  // hover to see the address if you ever need to
+    row.className = 'dev-row fadein' + (isUserNamed(d.track_id) ? ' named' : '');
+    row.dataset.track = d.track_id;
+    row.title = `track ${d.track_id}\nMACs (${(d.track_macs || []).length}):\n${macList}`;
     row.innerHTML = `
       <span class="dev-dot" style="background:${col}"></span>
       <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
       <span class="dev-rssi"></span>
       <span class="dev-n"></span>
     `;
-    // Wire the name input ONCE, on row creation — never re-attached.
     const inp = row.querySelector('input.dev-name');
     inp.addEventListener('click', e => e.stopPropagation());
     const save = debounce(() => {
       const v = inp.value.trim();
-      setName(d.mac, v);
-      row.classList.toggle('named', isUserNamed(d.mac));
-      // If they cleared it, snap the input back to the auto-name.
-      if (!v) inp.value = getName(d.mac);
+      setName(d.track_id, v);
+      row.classList.toggle('named', isUserNamed(d.track_id));
+      if (!v) inp.value = getName(d);  // empty → fall back to server name
       refreshDeviceLabels();
     }, 350);
     inp.addEventListener('input', save);
     inp.addEventListener('blur', save);
     liveListEl.appendChild(row);
-    liveRowByMac.set(d.mac, row);
+    liveRowByTrack.set(d.track_id, row);
   }
-  // Update only the text fields — leave the name input alone so the user
-  // can keep typing across polls.
+  // Update read-only bits without touching the name input.
   row.querySelector('.dev-rssi').textContent = `${d.rssi_max} dBm`;
-  row.querySelector('.dev-n').textContent = `${d.n_leaves}L`;
+  const nMacs = (d.track_macs || []).length;
+  row.querySelector('.dev-n').textContent = nMacs > 1 ? `${nMacs}×` : `${d.n_leaves}L`;
+  // Keep hover tooltip fresh as MACs accumulate
+  row.title = `track ${d.track_id}\nMACs (${nMacs}):\n${(d.track_macs || []).join('\n')}`;
   return row;
 }
 
@@ -1371,8 +1436,8 @@ async function pollLive() {
     liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
     if (devs.length === 0) {
       // Wipe rows + show empty note (no input to disturb).
-      for (const [mac, row] of liveRowByMac) { row.remove(); }
-      liveRowByMac.clear();
+      for (const [tid, row] of liveRowByTrack) { row.remove(); }
+      liveRowByTrack.clear();
       const note = r.note ? `<div class="empty">${r.note}</div>`
                           : `<div class="empty">no Apple devices currently seen by ≥2 positioned leaves</div>`;
       // Only set innerHTML if it's not already the empty message
@@ -1380,19 +1445,18 @@ async function pollLive() {
     } else {
       // Strip any non-row content (like the empty-state note) on first device arrival
       liveListEl.querySelectorAll(':scope > .empty, :scope > .live-loader').forEach(el => el.remove());
-      const seen = new Set(devs.map(d => d.mac));
+      const seen = new Set(devs.map(d => d.track_id));
       // Upsert in server order so RSSI-strongest stays near the top.
       let cursor = null;
       for (const d of devs) {
         const row = ensureLiveRow(d);
-        // Re-order: move row to current cursor position if not already there.
         const nextSibling = cursor ? cursor.nextSibling : liveListEl.firstChild;
         if (row !== nextSibling) liveListEl.insertBefore(row, nextSibling);
         cursor = row;
       }
-      // Drop any row not seen this poll.
-      for (const [mac, row] of liveRowByMac) {
-        if (!seen.has(mac)) { row.remove(); liveRowByMac.delete(mac); }
+      // Drop any row not seen this poll (track aged out on server).
+      for (const [tid, row] of liveRowByTrack) {
+        if (!seen.has(tid)) { row.remove(); liveRowByTrack.delete(tid); }
       }
     }
     _liveFirstPollDone = true;
@@ -1414,7 +1478,7 @@ function setTab(name) {
     // First open: replace placeholder with a spinner immediately so the
     // tab feels alive while the first /api/live request is in flight.
     if (!_liveFirstPollDone) {
-      liveRowByMac.clear();
+      liveRowByTrack.clear();
       liveListEl.innerHTML = `
         <div class="live-loader">
           <div class="spinner"></div>
@@ -1458,7 +1522,10 @@ document.getElementById('opt-clear-names').addEventListener('click', () => {
   // Snap sidebar inputs back to their auto-names.
   liveListEl.querySelectorAll('.dev-row').forEach(row => {
     const inp = row.querySelector('input.dev-name');
-    if (inp) inp.value = getName(row.dataset.mac);
+    const tid = row.dataset.track;
+    // Re-derive name from the last device payload we saw for this track
+    // — we don't have it cached client-side, so fall back to autoName.
+    if (inp && tid) inp.value = autoName(tid);
     row.classList.remove('named');
   });
   refreshDeviceLabels();
