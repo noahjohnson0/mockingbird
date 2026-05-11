@@ -58,6 +58,23 @@ last seen at 192.168.8.244).
   works for key auth.
 
 - **`status <node>`** — `curl http://<node>/` for any ESP32, prints the JSON.
+  Status now includes a `ble` block — `n_unique` (devices seen since last
+  reset) and `scan_window_ms`.
+
+- **`ble`** [duration_s] — Run a coordinated BLE-capture experiment across
+  every reachable leaf. Just runs `bash ~/repos/mockingbird/scripts/ble-experiment.sh`,
+  which: discovers leaves on `192.168.8.0/24` by Espressif OUI in ARP →
+  POSTs `/scan/reset` to all of them simultaneously → waits the duration
+  (default 60 s) → pulls `/scan/result` from each into
+  `~/repos/.scratch/ble-captures/<chipid>-<timestamp>.json` → `scp`'s
+  them and `scripts/analyze_ble_capture.py` to the Pi → runs the analyzer
+  on the first two captures. Output: per-leaf unique counts, intersection
+  size, RSSI-delta table for overlapping devices, log-distance estimates,
+  manufacturer breakdown, named advertisers. Distance is RELATIVE — see
+  the script's docstring for the path-loss model assumptions.
+
+- **`bleraw <node>`** — Just dump `GET /scan/result` JSON from one leaf
+  without resetting. Useful for inspecting a long-running scan window.
 
 ## Files in the repo to know
 
@@ -65,9 +82,11 @@ last seen at 192.168.8.244).
 |---|---|
 | `CLAUDE.md` | live state, hardware inventory, gotchas, next-moves |
 | `firmware/esp32-wroom-mockingbird/` | PlatformIO project for the ESP32 leaves (Arduino framework, 4 MB flash, OTA-enabled) |
-| `firmware/esp32-wroom-mockingbird/src/main.cpp` | WiFi + ArduinoOTA + WebServer |
+| `firmware/esp32-wroom-mockingbird/src/main.cpp` | WiFi + ArduinoOTA + WebServer + NimBLE continuous scanner |
 | `scripts/gen-esp32-secrets.sh` | regenerates `src/secrets.h` from `~/repos/.scratch/mockingbird-wifi.txt` — never hand-edit secrets.h |
 | `scripts/bootstrap-pi-subnet-router.sh` | idempotent Pi setup (Tailscale install, Mockingbird WiFi connection, IP forwarding) |
+| `scripts/ble-experiment.sh` | runs the multi-leaf BLE capture pipeline (discover → reset → wait → pull → scp → analyze) |
+| `scripts/analyze_ble_capture.py` | pairwise comparison of two leaves' `/scan/result` JSONs — unique counts, RSSI deltas, log-distance estimates |
 | `main/` | ESP-IDF firmware *for future ESP32-S3 hardware*. Doesn't run on the current WROOM-32 leaves — wrong chip family. |
 
 ## Credentials map (paths only, never values)

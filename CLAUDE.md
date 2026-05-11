@@ -296,10 +296,24 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 - **Mac:** on Mockingbird at `192.168.8.134`, sees Pi as a direct
   WireGuard peer (14ms RTT, no DERP relay). Tailscale ed25519 SSH key
   installed on both Pi and Opal.
-- **ESP32**: one unit on WiFi at `192.168.0.172` (entropy, old firmware);
-  9 others are unflashed AITRIP boards.
+- **ESP32 leaves (running v0.2.0-ble firmware):**
+  - `mockingbird-4ce184` (MAC `8c:94:df:4c:e1:84`) — last seen at `192.168.8.244`
+  - `mockingbird-4c0bdc` (MAC `8c:94:df:4c:0b:dc`) — last seen at `192.168.8.196`
+  - Both run WiFi STA + ArduinoOTA + HTTP server + **NimBLE continuous
+    BLE scanner**. `GET /scan/result` dumps every BLE advertiser seen
+    since the last `POST /scan/reset` (or boot), with aggregated RSSI
+    min/max/avg + advertised name + manufacturer-data hex.
+  - 8 unflashed AITRIP boards remain in the pack.
+- One unit on entropy at `192.168.0.172` (MAC `58:e6:c5:6f:4a:dc`) with old
+  pre-mockingbird firmware — needs reflash to join the mesh.
 - ESP32 firmware in `main/`: never been built (ESP-IDF not installed,
   hardware target is S3 which Noah doesn't own yet).
+- **First experiment ran** (60s simultaneous capture from 4ce184 + 4c0bdc):
+  73 unique BLE advertisers across both, 46 overlapping (63% of union),
+  27 spatially-unique to one or the other. ~63 packets/sec at each leaf,
+  ~85% Apple Continuity. Capture JSONs at
+  `~/repos/.scratch/ble-captures/<chipid>-<ts>.json` and on the Pi at
+  `/tmp/`. Analyzer: `scripts/analyze_ble_capture.py` (pairwise).
 - The bootstrap script `scripts/bootstrap-glinet-router.sh` is **stale** —
   it assumes Tailscale-on-Opal which we abandoned. Either rewrite for the
   current architecture or delete.
