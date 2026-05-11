@@ -63,6 +63,13 @@ def open_db() -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_le_ts ON leaf_events(ts);
     """)
+    # Idempotent schema migrations — older deploys won't have `location`.
+    for col_spec in ("obs ADD COLUMN location TEXT",
+                     "leaf_events ADD COLUMN location TEXT"):
+        try:
+            db.execute(f"ALTER TABLE {col_spec}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return db
 
 
@@ -118,6 +125,7 @@ async def handle_client(
 
             now = time.time()
             evt = msg.get("event")
+            leaf_location: str | None = msg.get("location") or None
 
             if evt == "hello":
                 leaf = msg.get("leaf") or msg.get("hostname")
@@ -125,20 +133,24 @@ async def handle_client(
                     ctr.drop += 1
                     continue
                 ctr.hello += 1
-                ctr.leaves.setdefault(leaf, {"n_obs": 0, "last": now})
+                ctr.leaves.setdefault(leaf, {"n_obs": 0, "last": now, "location": leaf_location})
+                ctr.leaves[leaf]["location"] = leaf_location
                 db.execute(
-                    "INSERT INTO leaf_events(ts,leaf,event,info) VALUES (?,?,?,?)",
-                    (now, leaf, "hello", json.dumps(msg)),
+                    "INSERT INTO leaf_events(ts,leaf,event,info,location) VALUES (?,?,?,?,?)",
+                    (now, leaf, "hello", json.dumps(msg), leaf_location),
                 )
-                log.info(f"hello: {leaf} v{msg.get('version','?')} from {peer}")
+                log.info(f"hello: {leaf} v{msg.get('version','?')} location='{leaf_location or ''}' from {peer}")
 
             elif evt == "obs" and leaf:
                 ctr.obs += 1
                 ctr.leaves[leaf]["n_obs"] += 1
                 ctr.leaves[leaf]["last"] = now
+                # Prefer per-obs location if set; otherwise fall back to the
+                # leaf's last-known label from hello.
+                loc = leaf_location or ctr.leaves[leaf].get("location")
                 db.execute(
-                    "INSERT INTO obs(ts,leaf,mac,rssi,addr_type,name,manuf,leaf_t_ms)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO obs(ts,leaf,mac,rssi,addr_type,name,manuf,leaf_t_ms,location)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         now,
                         leaf,
@@ -148,6 +160,7 @@ async def handle_client(
                         msg.get("name") or None,
                         msg.get("manuf") or None,
                         msg.get("t_ms"),
+                        loc,
                     ),
                 )
 
@@ -155,8 +168,8 @@ async def handle_client(
                 ctr.hb += 1
                 ctr.leaves[leaf]["last"] = now
                 db.execute(
-                    "INSERT INTO leaf_events(ts,leaf,event,info) VALUES (?,?,?,?)",
-                    (now, leaf, "hb", json.dumps(msg)),
+                    "INSERT INTO leaf_events(ts,leaf,event,info,location) VALUES (?,?,?,?,?)",
+                    (now, leaf, "hb", json.dumps(msg), ctr.leaves[leaf].get("location")),
                 )
 
             else:

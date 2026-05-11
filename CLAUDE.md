@@ -332,6 +332,20 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
   architecture). `scripts/bootstrap-pi-subnet-router.sh` is the current
   one.
 
+## Future capabilities (full list in `docs/roadmap.md`)
+
+- **IMU (gyro + accel) on each leaf** — orientation-aware RSSI normalization
+  (closes the spread-ratio uncertainty gap), tamper detection, multimodal
+  activity context. ~$2 MPU6050 wired to I²C on the WROOM-32.
+- **Real trilateration** — once leaf positions are recorded, solve the
+  system instead of just reporting relative distance ratios.
+- **Live TUI / web dashboard** — tail-the-DB rolling view of "what does
+  the network see right now."
+- **ESP-NOW peer mesh** — for leaves out of WiFi range.
+- **ESP32-S3 firmware path** — already designed in `main/`, just unflashed.
+- **Battery-powered leaves**, **audio leaf** (I²S MEMS mic + classifier),
+  **PIR-augmented leaf**, **HomeKit/HA bridge**.
+
 ## Next moves on deck
 
 1. Flash one ESP32-WROOM-32 with custom firmware (target plain ESP32, not
