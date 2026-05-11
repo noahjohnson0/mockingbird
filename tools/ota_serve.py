@@ -6,13 +6,13 @@ across the tailnet.
 Usage (from the repo root):
 
     idf.py build
-    python3 tools/ota_serve.py            # serves build/esp32-fw.bin on :8000
+    python3 tools/ota_serve.py            # serves build/noahnet.bin on :8000
 
 Then, from any machine on the tailnet:
 
     curl -X POST http://<device-ts-ip>/ota \\
          -H "X-OTA-Token: <secret>" \\
-         -d "{\\"url\\":\\"http://<your-ts-ip>:8000/esp32-fw.bin\\"}"
+         -d "{\\"url\\":\\"http://<your-ts-ip>:8000/noahnet.bin\\"}"
 
 The connection between the ESP32 and this server runs through WireGuard,
 so plain HTTP is fine — WireGuard provides confidentiality and integrity.
@@ -32,8 +32,8 @@ def main() -> int:
     parser.add_argument(
         "binary",
         nargs="?",
-        default="build/esp32-fw.bin",
-        help="path to firmware .bin (default: build/esp32-fw.bin)",
+        default="build/noahnet.bin",
+        help="path to firmware .bin (default: build/noahnet.bin)",
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="0.0.0.0")

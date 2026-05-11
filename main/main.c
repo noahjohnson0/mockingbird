@@ -1,5 +1,5 @@
 /**
- * esp32-fw — general-purpose ESP32-S3 firmware
+ * noahnet — general-purpose ESP32-S3 firmware
  *
  *   WiFi STA  →  MicroLink (Tailscale)  →  HTTP control + OTA endpoint
  *
@@ -8,7 +8,7 @@
  *   curl http://<device>.<tailnet>.ts.net/                 # status
  *   curl -X POST http://<device>.<tailnet>.ts.net/ota \
  *        -H "X-OTA-Token: <secret>" \
- *        -d '{"url":"http://100.x.y.z:8000/esp32-fw.bin"}'
+ *        -d '{"url":"http://100.x.y.z:8000/noahnet.bin"}'
  */
 
 #include "esp_heap_caps.h"
@@ -55,7 +55,7 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    ESP_LOGI(TAG, "esp32-fw boot — free heap %u, PSRAM free %u",
+    ESP_LOGI(TAG, "noahnet boot — free heap %u, PSRAM free %u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 

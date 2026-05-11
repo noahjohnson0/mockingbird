@@ -1,4 +1,4 @@
-# Top-level ESP-IDF project file for esp32-fw.
+# Top-level ESP-IDF project file for noahnet.
 cmake_minimum_required(VERSION 3.16)
 
 # Pull MicroLink (Tailscale client) components in from the submodule tree.
@@ -7,4 +7,4 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS "external/microlink/components")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp32-fw)
+project(noahnet)

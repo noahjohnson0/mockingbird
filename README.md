@@ -1,4 +1,4 @@
-# esp32-fw
+# noahnet
 
 General-purpose ESP32-S3 firmware that joins a Tailscale tailnet at boot and
 exposes an HTTP control + OTA endpoint. Once flashed, every device shows up
@@ -52,7 +52,7 @@ source ./esp-idf/export.sh   # add this to your shell profile or run per session
 ### 2. Clone this repo and pull MicroLink
 
 ```bash
-cd ~/repos/esp32-fw
+cd ~/repos/noahnet
 git submodule update --init --recursive
 ```
 
@@ -94,18 +94,18 @@ From any machine on the tailnet:
 # 1. Build the new firmware locally
 idf.py build
 
-# 2. Serve build/esp32-fw.bin over HTTP from your machine
+# 2. Serve build/noahnet.bin over HTTP from your machine
 python3 tools/ota_serve.py
-# → serving … as http://0.0.0.0:8000/esp32-fw.bin
+# → serving … as http://0.0.0.0:8000/noahnet.bin
 
 # 3. In another terminal, tell the device to pull it
-DEVICE=esp32-fw            # MagicDNS name, or use the 100.x.y.z IP
+DEVICE=noahnet            # MagicDNS name, or use the 100.x.y.z IP
 TOKEN=$(grep CONFIG_FW_OTA_TOKEN sdkconfig.credentials | cut -d'"' -f2)
 MY_TS_IP=$(tailscale ip -4)
 
 curl -X POST "http://$DEVICE/ota" \
      -H "X-OTA-Token: $TOKEN" \
-     -d "{\"url\":\"http://$MY_TS_IP:8000/esp32-fw.bin\"}"
+     -d "{\"url\":\"http://$MY_TS_IP:8000/noahnet.bin\"}"
 ```
 
 The flow:
@@ -127,7 +127,7 @@ fine. For pulls from a public URL, use `https://` — the bundled root CA set
 ## Status endpoint
 
 ```bash
-$ curl http://esp32-fw/
+$ curl http://noahnet/
 {"version":"1","build":"May 10 2026 19:53:11","uptime_s":124,"free_heap":156384,
  "tailscale":{"connected":true,"vpn_ip":"100.81.222.42","peers":3}}
 ```
