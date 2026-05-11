@@ -342,14 +342,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
             # ----- per-leaf stats from latest heartbeat -----
-            # Latest hb per leaf in last 5 min
+            # Wide lookback (24h) so silent/dead leaves still appear in
+            # the Stats tab — a leaf that stopped heartbeating is the one
+            # you most need to see, not hide.
             rows = db.execute(
                 "SELECT leaf, ts, info FROM leaf_events "
                 "WHERE event='hb' AND ts >= ? "
                 "ORDER BY ts DESC",
-                (now - 300,),
+                (now - 86400,),
             ).fetchall()
-            seen = {}
+            seen: dict[str, dict] = {}
             for leaf, ts, info_s in rows:
                 if leaf in seen:
                     continue
@@ -367,7 +369,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "heap_free": info.get("heap"),
                     "wifi_rssi": info.get("rssi"),
                 }
-            # Add obs rate over last 30s
+            # Always also include known leaves and positioned leaves even
+            # if they have NO heartbeat in the lookback at all — those
+            # show up as fully-offline with no telemetry.
+            try:
+                positioned_leaves = {row[0] for row in db.execute("SELECT leaf FROM leaf_position")}
+            except sqlite3.OperationalError:
+                positioned_leaves = set()
+            for leaf in KNOWN_LEAVES.keys() | positioned_leaves:
+                if leaf not in seen:
+                    seen[leaf] = {
+                        "leaf": leaf, "hb_age_s": None,
+                        "uptime_s": None, "n_sent": None, "n_dropped": None,
+                        "q_depth": None, "heap_free": None, "wifi_rssi": None,
+                    }
+            # Obs rate over last 30 s
             obs_rows = db.execute(
                 "SELECT leaf, COUNT(*) FROM obs INDEXED BY idx_obs_ts "
                 "WHERE ts >= ? GROUP BY leaf",
@@ -376,7 +392,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             obs_rate = {leaf: round(n / 30.0, 1) for leaf, n in obs_rows}
             for leaf in seen:
                 seen[leaf]["obs_per_s"] = obs_rate.get(leaf, 0.0)
-            leaves_list = sorted(seen.values(), key=lambda x: x["leaf"])
+                # Status classification
+                age = seen[leaf]["hb_age_s"]
+                if age is None or age > 600:
+                    seen[leaf]["status"] = "offline"
+                elif age > 60:
+                    seen[leaf]["status"] = "stale"
+                else:
+                    seen[leaf]["status"] = "ok"
+            # Sort: offline first (most urgent), then stale, then ok by name
+            order = {"offline": 0, "stale": 1, "ok": 2}
+            leaves_list = sorted(seen.values(),
+                                 key=lambda x: (order.get(x["status"], 9), x["leaf"]))
             return self._json({"as_of": now, "pi": pi, "leaves": leaves_list})
 
         if url.path == "/api/calibration":

@@ -299,18 +299,27 @@
   }
   .leaf-stat-row {
     display: grid;
-    grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px; align-items: center;
+    grid-template-columns: 110px 1fr 1fr 1fr; gap: 8px; align-items: center;
     padding: 6px 4px; border-bottom: 1px solid #1f2227;
     font-size: 11px; font-family: ui-monospace, "SF Mono", monospace;
   }
   .leaf-stat-row:last-child { border-bottom: 0; }
-  .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; }
+  .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; display: flex; align-items: center; gap: 6px; }
   .leaf-stat-row .stale { color: #f59e0b; }
   .leaf-stat-row .ok    { color: #22c55e; }
+  .leaf-stat-row .err   { color: #ef4444; }
+  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
+  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
+  .leaf-stat-row .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: #22c55e;
+  }
+  .leaf-stat-row.is-stale   .status-dot { background: #f59e0b; animation: pulse 1.4s ease-in-out infinite; }
+  .leaf-stat-row.is-offline .status-dot { background: #ef4444; animation: pulse 1.0s ease-in-out infinite; }
   .leaf-stat-head {
     color: #6b7280; font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.06em; padding: 4px;
-    display: grid; grid-template-columns: 90px 1fr 1fr 1fr; gap: 8px;
+    display: grid; grid-template-columns: 110px 1fr 1fr 1fr; gap: 8px;
   }
 </style>
 </head>
@@ -1659,27 +1668,41 @@ async function pollStats() {
     const host = document.getElementById('leaf-stats');
     host.innerHTML = '';
     for (const L of r.leaves || []) {
-      const ageCls = L.hb_age_s > 30 ? 'stale' : 'ok';
-      const obsCls = L.obs_per_s > 5 ? 'ok' : L.obs_per_s > 0 ? '' : 'stale';
+      const status = L.status || 'ok';
+      const obsCls = L.obs_per_s > 5 ? 'ok' : L.obs_per_s > 0 ? '' : 'err';
       const dropPct = L.n_sent ? Math.round(100 * L.n_dropped / (L.n_sent + L.n_dropped)) : 0;
+      const dropCls = dropPct > 30 ? 'err' : dropPct > 10 ? 'stale' : '';
+      const qCls = L.q_depth === 64 ? 'err' : L.q_depth >= 32 ? 'stale' : '';
+      const ageDisplay = L.hb_age_s == null ? 'never' :
+        L.hb_age_s > 3600 ? `${Math.floor(L.hb_age_s/3600)}h ${Math.floor(L.hb_age_s/60)%60}m ago` :
+        L.hb_age_s > 120  ? `${Math.floor(L.hb_age_s/60)}m ago` :
+        `${L.hb_age_s.toFixed(0)}s ago`;
+      const ageCls = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
       const row = document.createElement('div');
-      row.className = 'leaf-stat-row';
+      row.className = 'leaf-stat-row' + (status === 'offline' ? ' is-offline' :
+                                         status === 'stale'   ? ' is-stale'   : '');
+      // Wide label for offline rows so user can spot them
+      const tag = status === 'offline' ? '<span class="err" style="font-size:9px; text-transform:uppercase">OFFLINE</span>' :
+                  status === 'stale'   ? '<span class="stale" style="font-size:9px; text-transform:uppercase">STALE</span>' : '';
       row.innerHTML = `
-        <div class="lname">${L.leaf.replace('mockingbird-', '')}</div>
+        <div class="lname">
+          <span class="status-dot"></span>
+          <span>${L.leaf.replace('mockingbird-', '')}</span>
+        </div>
         <div>
-          ${fmtUptime(L.uptime_s)}<br>
-          <span class="${ageCls}" style="font-size:10px">hb ${L.hb_age_s}s ago</span>
+          ${L.uptime_s ? fmtUptime(L.uptime_s) : '<span class="err">no telemetry</span>'}<br>
+          <span class="${ageCls}" style="font-size:10px">${tag} hb ${ageDisplay}</span>
         </div>
         <div>
           <span class="${obsCls}">${L.obs_per_s.toFixed(1)}/s</span><br>
           <span style="font-size:10px; color:#6b7280">
-            sent ${fmtNum(L.n_sent)} · drop ${fmtNum(L.n_dropped)} (${dropPct}%)
+            sent ${fmtNum(L.n_sent)} · <span class="${dropCls}">drop ${fmtNum(L.n_dropped)} (${dropPct}%)</span>
           </span>
         </div>
         <div>
-          ${L.wifi_rssi} dBm<br>
+          ${L.wifi_rssi != null ? L.wifi_rssi + ' dBm' : '—'}<br>
           <span style="font-size:10px; color:#6b7280">
-            heap ${fmtBytes(L.heap_free)} · q=${L.q_depth}
+            heap ${fmtBytes(L.heap_free)} · <span class="${qCls}">q=${L.q_depth ?? '—'}</span>
           </span>
         </div>
       `;
