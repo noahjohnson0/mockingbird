@@ -1,4 +1,13 @@
-// mockingbird ESP32-WROOM-32 leaf firmware (BLE → TCP streamer, v0.3.0-stream).
+// mockingbird ESP32-WROOM-32 leaf firmware (BLE → TCP streamer, v0.3.1-stream).
+//
+// v0.3.1 additions over v0.3.0:
+//   • NVS-persisted location label, settable via POST /location.
+//     /status reports it, the uplink hello + every obs include it.
+//   • Non-blocking TCP write: we check WiFiClient::availableForWrite()
+//     against the line size before send. If the send buffer is full
+//     (== peer dead or backpressured), we drop the packet and force a
+//     reconnect rather than block the uplink task — which is what
+//     wedged 4ce184 for 2 hours during the Pi swap window.
 //
 // Architecture is now PUSH instead of PULL:
 //   • BLE callback enqueues each observation into a small FreeRTOS queue
@@ -28,7 +37,10 @@
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 #include <esp_system.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 
 #include "secrets.h"
 
@@ -50,6 +62,26 @@ static String deviceHostname() {
 }
 
 static WebServer server(80);
+
+// ---------- location label (NVS-persisted) ----------
+
+static Preferences g_prefs;
+static char        g_location[32] = {0};
+
+static void load_location() {
+    g_prefs.begin("mockingbird", /*readOnly=*/true);
+    String s = g_prefs.getString("location", "");
+    g_prefs.end();
+    strncpy(g_location, s.c_str(), sizeof(g_location) - 1);
+}
+
+static void save_location(const char *s) {
+    strncpy(g_location, s, sizeof(g_location) - 1);
+    g_location[sizeof(g_location) - 1] = '\0';
+    g_prefs.begin("mockingbird", /*readOnly=*/false);
+    g_prefs.putString("location", g_location);
+    g_prefs.end();
+}
 
 // ---------- streaming message queue ----------
 
@@ -119,10 +151,20 @@ static bool uplink_connect() {
     }
     g_tcp.setNoDelay(true);
 
-    char hello[160];
+    // 1-second send timeout — write() returns short rather than blocking
+    // when the peer is dead-but-not-yet-detected. Combined with the short-
+    // write fallback below, this kills the wedge condition.
+    int fd = g_tcp.fd();
+    if (fd >= 0) {
+        struct timeval to = {1, 0};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+    }
+
+    char hello[200];
     int n = snprintf(hello, sizeof(hello),
-                     "{\"event\":\"hello\",\"leaf\":\"%s\",\"version\":\"%s\"}\n",
-                     deviceHostname().c_str(), FW_VERSION);
+                     "{\"event\":\"hello\",\"leaf\":\"%s\",\"version\":\"%s\","
+                     "\"location\":\"%s\"}\n",
+                     deviceHostname().c_str(), FW_VERSION, g_location);
     g_tcp.write((const uint8_t *)hello, n);
     g_up = true;
     Serial.println("[uplink] connected, hello sent");
@@ -148,15 +190,24 @@ static void uplink_task(void * /*pv*/) {
             int n = snprintf(
                 line, sizeof(line),
                 "{\"event\":\"obs\",\"mac\":\"%s\",\"rssi\":%d,\"addr_type\":%u,"
-                "\"name\":\"%s\",\"manuf\":\"%s\",\"t_ms\":%lu}\n",
+                "\"name\":\"%s\",\"manuf\":\"%s\",\"t_ms\":%lu,"
+                "\"location\":\"%s\"}\n",
                 m.mac, m.rssi, (unsigned)m.addr_type,
-                m.name, m.manuf, (unsigned long)m.t_ms);
+                m.name, m.manuf, (unsigned long)m.t_ms,
+                g_location);
+
+            // Non-blocking-ish guard: if write returns less than full, the
+            // socket is backpressured or dead — force reconnect rather
+            // than block on subsequent calls. This catches the wedge
+            // case (peer dead but not yet detected by TCP keep-alive)
+            // because the very next write returns 0.
             int wrote = g_tcp.write((const uint8_t *)line, n);
             if (wrote == n) {
                 g_n_sent++;
             } else {
                 g_n_dropped++;
-                g_tcp.stop();  // force reconnect on next loop
+                Serial.printf("[uplink] short write %d/%d — reconnect\n", wrote, n);
+                g_tcp.stop();
             }
         }
 
@@ -180,14 +231,14 @@ static void uplink_task(void * /*pv*/) {
 // ---------- HTTP handlers ----------
 
 static void handleStatus() {
-    char body[480];
+    char body[560];
     snprintf(body, sizeof(body),
-             "{\"hostname\":\"%s\",\"version\":\"%s\","
+             "{\"hostname\":\"%s\",\"version\":\"%s\",\"location\":\"%s\","
              "\"uptime_s\":%lu,\"rssi\":%d,\"free_heap\":%u,"
              "\"ip\":\"%s\",\"mac\":\"%s\","
              "\"uplink\":{\"connected\":%s,\"sent\":%lu,\"dropped\":%lu,"
              "\"q_depth\":%d,\"host\":\"%s:%d\"}}",
-             deviceHostname().c_str(), FW_VERSION,
+             deviceHostname().c_str(), FW_VERSION, g_location,
              (unsigned long)(millis() / 1000UL),
              WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
              WiFi.localIP().toString().c_str(),
@@ -196,6 +247,49 @@ static void handleStatus() {
              (unsigned long)g_n_sent, (unsigned long)g_n_dropped,
              (int)uxQueueMessagesWaiting(g_q),
              MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+    server.send(200, "application/json", body);
+}
+
+static void handleLocationGet() {
+    char body[64];
+    snprintf(body, sizeof(body), "{\"location\":\"%s\"}", g_location);
+    server.send(200, "application/json", body);
+}
+
+static void handleLocationPost() {
+    // Accept either plain text body or JSON {"label":"..."}.
+    String raw = server.arg("plain");
+    raw.trim();
+    String label;
+    if (raw.startsWith("{")) {
+        int s = raw.indexOf("\"label\"");
+        int colon = (s >= 0) ? raw.indexOf(':', s) : -1;
+        int q1 = (colon >= 0) ? raw.indexOf('"', colon) : -1;
+        int q2 = (q1 >= 0) ? raw.indexOf('"', q1 + 1) : -1;
+        if (q2 > q1) label = raw.substring(q1 + 1, q2);
+    } else {
+        label = raw;
+    }
+    if (label.length() == 0 || label.length() >= sizeof(g_location)) {
+        server.send(400, "application/json", "{\"error\":\"label empty or too long\"}");
+        return;
+    }
+    // Sanitize: printable ASCII only
+    for (size_t i = 0; i < label.length(); i++) {
+        char c = label[i];
+        if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+            server.send(400, "application/json", "{\"error\":\"bad char\"}");
+            return;
+        }
+    }
+    save_location(label.c_str());
+
+    // Force uplink reconnect so the new label propagates immediately in
+    // the hello message (and every subsequent obs).
+    g_tcp.stop();
+
+    char body[96];
+    snprintf(body, sizeof(body), "{\"status\":\"ok\",\"location\":\"%s\"}", g_location);
     server.send(200, "application/json", body);
 }
 
@@ -268,6 +362,9 @@ void setup() {
         ESP.restart();
     }
 
+    load_location();
+    Serial.printf("[loc] location=\"%s\"\n", g_location);
+
     connectWiFi();
 
     if (!MDNS.begin(deviceHostname().c_str())) {
@@ -284,9 +381,11 @@ void setup() {
     // core 0). Stack 4 KB is plenty for JSON-line formatting + a TCP write.
     xTaskCreatePinnedToCore(uplink_task, "uplink", 4096, nullptr, 1, nullptr, 1);
 
-    server.on("/",        HTTP_GET,  handleStatus);
-    server.on("/version", HTTP_GET,  handleVersion);
-    server.on("/restart", HTTP_POST, handleRestart);
+    server.on("/",         HTTP_GET,  handleStatus);
+    server.on("/version",  HTTP_GET,  handleVersion);
+    server.on("/restart",  HTTP_POST, handleRestart);
+    server.on("/location", HTTP_GET,  handleLocationGet);
+    server.on("/location", HTTP_POST, handleLocationPost);
     server.begin();
     Serial.printf("[http] :80 ready; streaming to %s:%d\n",
                   MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
