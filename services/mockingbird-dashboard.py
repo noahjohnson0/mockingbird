@@ -48,6 +48,11 @@ def open_db() -> sqlite3.Connection:
             updated_ts REAL DEFAULT (strftime('%s','now'))
         )
     """)
+    # Idempotent: add north_deg if the table existed before this column
+    try:
+        db.execute("ALTER TABLE room ADD COLUMN north_deg REAL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return db
 
 
@@ -117,11 +122,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if url.path == "/api/room":
             db = open_db()
             row = db.execute(
-                "SELECT width, depth, height, notes FROM room WHERE id = 1"
+                "SELECT width, depth, height, notes, north_deg FROM room WHERE id = 1"
             ).fetchone()
             if row:
-                return self._json({"width": row[0], "depth": row[1], "height": row[2], "notes": row[3]})
-            return self._json({"width": None, "depth": None, "height": None, "notes": None})
+                return self._json({
+                    "width": row[0], "depth": row[1], "height": row[2],
+                    "notes": row[3], "north_deg": row[4] or 0,
+                })
+            return self._json({"width": None, "depth": None, "height": None, "notes": None, "north_deg": 0})
 
         return self._send(404, b"not found", "text/plain")
 
@@ -131,18 +139,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 msg = json.loads(self._read_body() or "{}")
                 w = float(msg["width"]); d = float(msg["depth"]); h = float(msg["height"])
+                north = float(msg.get("north_deg") or 0) % 360
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 return self._json({"error": "width/depth/height must be numbers"}, 400)
             notes = (msg.get("notes") or "")[:200] or None
             db = open_db()
             db.execute("""
-                INSERT INTO room(id, width, depth, height, notes, updated_ts)
-                VALUES (1, ?, ?, ?, ?, strftime('%s','now'))
+                INSERT INTO room(id, width, depth, height, notes, north_deg, updated_ts)
+                VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
                 ON CONFLICT(id) DO UPDATE SET
                     width=excluded.width, depth=excluded.depth, height=excluded.height,
-                    notes=excluded.notes, updated_ts=excluded.updated_ts
-            """, (w, d, h, notes))
-            return self._json({"status": "ok", "width": w, "depth": d, "height": h})
+                    notes=excluded.notes, north_deg=excluded.north_deg, updated_ts=excluded.updated_ts
+            """, (w, d, h, notes, north))
+            return self._json({"status": "ok", "width": w, "depth": d, "height": h, "north_deg": north})
         if url.path == "/api/leaves":
             try:
                 msg = json.loads(self._read_body() or "{}")
