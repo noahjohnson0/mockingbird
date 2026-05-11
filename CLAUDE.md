@@ -296,27 +296,41 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 - **Mac:** on Mockingbird at `192.168.8.134`, sees Pi as a direct
   WireGuard peer (14ms RTT, no DERP relay). Tailscale ed25519 SSH key
   installed on both Pi and Opal.
-- **ESP32 leaves (running v0.2.0-ble firmware):**
-  - `mockingbird-4ce184` (MAC `8c:94:df:4c:e1:84`) — last seen at `192.168.8.244`
-  - `mockingbird-4c0bdc` (MAC `8c:94:df:4c:0b:dc`) — last seen at `192.168.8.196`
-  - Both run WiFi STA + ArduinoOTA + HTTP server + **NimBLE continuous
-    BLE scanner**. `GET /scan/result` dumps every BLE advertiser seen
-    since the last `POST /scan/reset` (or boot), with aggregated RSSI
-    min/max/avg + advertised name + manufacturer-data hex.
-  - 8 unflashed AITRIP boards remain in the pack.
+- **ESP32 leaves (running v0.3.0-stream firmware):**
+  - `mockingbird-4ce184` (MAC `8c:94:df:4c:e1:84`) — last seen `192.168.8.244`
+  - `mockingbird-4c0bdc` (MAC `8c:94:df:4c:0b:dc`) — last seen `192.168.8.196`
+  - `mockingbird-4c36ec` (MAC `8c:94:df:4c:36:ec`) — last seen `192.168.8.219`
+  - `mockingbird-4db204` (MAC `8c:94:df:4d:b2:04`) — last seen `192.168.8.168`
+  - All four **stream BLE observations as newline-delimited JSON over TCP
+    to `mockingbird-pi:9001`** (the collector). Per-leaf state on-device
+    is now just a 64-entry queue + counters, no accumulation, no OOM.
+    Heap stays at ~120 KB free under continuous heavy scanning.
+  - HTTP API on `:80` is minimal: `GET /`, `GET /version`, `POST /restart`.
+    `/scan/*` is gone (the Pi has every observation continuously).
+  - ArduinoOTA on UDP 3232 still works; the BLE scan pauses during OTA.
+  - 6 unflashed AITRIP boards remain in the pack.
 - One unit on entropy at `192.168.0.172` (MAC `58:e6:c5:6f:4a:dc`) with old
   pre-mockingbird firmware — needs reflash to join the mesh.
 - ESP32 firmware in `main/`: never been built (ESP-IDF not installed,
   hardware target is S3 which Noah doesn't own yet).
-- **First experiment ran** (60s simultaneous capture from 4ce184 + 4c0bdc):
-  73 unique BLE advertisers across both, 46 overlapping (63% of union),
-  27 spatially-unique to one or the other. ~63 packets/sec at each leaf,
-  ~85% Apple Continuity. Capture JSONs at
-  `~/repos/.scratch/ble-captures/<chipid>-<ts>.json` and on the Pi at
-  `/tmp/`. Analyzer: `scripts/analyze_ble_capture.py` (pairwise).
-- The bootstrap script `scripts/bootstrap-glinet-router.sh` is **stale** —
-  it assumes Tailscale-on-Opal which we abandoned. Either rewrite for the
-  current architecture or delete.
+- **Pi collector service** (`mockingbird-collector.service`) running as a
+  systemd unit on the Pi: listens on `0.0.0.0:9001`, writes every
+  observation into `~/mockingbird/observations.sqlite` with indices on
+  `(ts)`, `(mac, ts)`, `(leaf, ts)`. Also stores `leaf_events` table for
+  hello/heartbeat/disconnect tracking.
+- **Live analysis** via `scripts/analyze_ble_db.py` — query any time
+  window from the SQLite DB on the Pi. Output: per-leaf rates, uplink
+  health from latest heartbeat, coverage histogram, RSSI matrix, biggest-
+  spread (spatial-info) devices, per-leaf singletons, manufacturer +
+  named-advertiser tables, **churn detection** (midpoint appeared /
+  disappeared lists). First full 4-way 60s run: 78 devices, 46 universal
+  (59%), ~110 obs/sec aggregate, zero drops, zero crashes.
+- Old `scripts/analyze_ble_capture.py` kept for the legacy JSON-file
+  captures in `~/repos/.scratch/ble-captures/`; new captures don't
+  produce JSON files at all — everything goes straight to the DB.
+- Earlier `scripts/bootstrap-glinet-router.sh` is **deleted** (was wrong
+  architecture). `scripts/bootstrap-pi-subnet-router.sh` is the current
+  one.
 
 ## Next moves on deck
 

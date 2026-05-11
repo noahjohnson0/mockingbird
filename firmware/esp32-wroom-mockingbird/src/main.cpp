@@ -1,42 +1,45 @@
-// mockingbird ESP32-WROOM-32 leaf firmware (BLE scanner).
+// mockingbird ESP32-WROOM-32 leaf firmware (BLE → TCP streamer, v0.3.0-stream).
 //
-//   WiFi STA (Mockingbird)
-//     │
-//     ├── ArduinoOTA listener on UDP 3232
-//     │
-//     ├── HTTP server on :80
-//     │     GET  /            status JSON
-//     │     GET  /version     plain text version
-//     │     POST /restart     reboot
-//     │     POST /scan/reset  clear the observation table, restart window
-//     │     GET  /scan/result JSON dump of every BLE advertiser seen since
-//     │                       /scan/reset (or since boot), with aggregated
-//     │                       RSSI min/max/avg + advertised name + mfg data
-//     │
-//     └── NimBLE scanner running continuously in the background, accumulating
-//         observations into an in-memory map. Adv callback fires on every
-//         packet — `wantDup=true` so we get per-packet RSSI samples, not just
-//         first-seen.
+// Architecture is now PUSH instead of PULL:
+//   • BLE callback enqueues each observation into a small FreeRTOS queue
+//     (64 slots, ~6 KB total) and returns ASAP — zero accumulation on-device.
+//   • A dedicated uplink task drains the queue and writes each observation
+//     as a newline-delimited JSON record to mockingbird-pi:9001 over TCP.
+//   • The Pi runs `services/mockingbird-collector.py` which persists every
+//     record to an indexed SQLite database for time-series analysis.
 //
-// The HTTP /scan/* endpoints are how the Pi aggregator pulls per-leaf data.
-// Two leaves doing simultaneous 60s captures from different physical spots
-// is the smallest meaningful "distributed BLE sensing" experiment.
+// This kills the OOM-reboot bug from v0.2.x: the leaves no longer hold the
+// 256-entry observation table that was pressuring the heap during dense
+// scans. They also no longer crash if the BLE neighborhood grows large.
+//
+// HTTP endpoints retained (minimal):
+//     GET  /            status JSON (now includes uplink counters)
+//     GET  /version
+//     POST /restart
+//
+// The /scan/reset and /scan/result endpoints from v0.2.x are gone — the Pi
+// has every observation continuously, so scan windows are an artifact of
+// the database query, not the device.
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <NimBLEDevice.h>
 #include <esp_system.h>
 
-#include <map>
-#include <mutex>
-#include <string>
-
 #include "secrets.h"
 
 static const char *FW_VERSION = MOCKINGBIRD_FW_VERSION;
+
+#ifndef MOCKINGBIRD_COLLECTOR_HOST
+#define MOCKINGBIRD_COLLECTOR_HOST "192.168.8.202"
+#endif
+#ifndef MOCKINGBIRD_COLLECTOR_PORT
+#define MOCKINGBIRD_COLLECTOR_PORT 9001
+#endif
 
 static String deviceHostname() {
     uint8_t mac[6];
@@ -48,83 +51,151 @@ static String deviceHostname() {
 
 static WebServer server(80);
 
-// ---------- BLE observation aggregator ----------
+// ---------- streaming message queue ----------
 
-struct Obs {
-    int      rssi_min = 127;
-    int      rssi_max = -127;
-    int32_t  rssi_sum = 0;
-    uint32_t count    = 0;
-    uint32_t first_ms = 0;
-    uint32_t last_ms  = 0;
-    std::string name;     // sanitized to printable ASCII
-    std::string manuf;    // hex of first 16 bytes of mfg data, lowercase
-    uint8_t  addr_type = 0;
+struct Msg {
+    char     mac[18];     // "AA:BB:CC:DD:EE:FF\0"
+    int8_t   rssi;
+    uint8_t  addr_type;
+    char     name[24];    // truncated/sanitized
+    char     manuf[33];   // hex of first 16 mfg-data bytes + NUL
+    uint32_t t_ms;
 };
 
-static std::map<std::string, Obs> g_obs;
-static std::mutex                 g_obs_mu;
-static uint32_t                   g_scan_start_ms = 0;
+#define MSG_QUEUE_LEN 64
+
+static QueueHandle_t       g_q;
+static volatile uint32_t   g_n_sent    = 0;
+static volatile uint32_t   g_n_dropped = 0;
+static volatile bool       g_up        = false;
+
+// ---------- BLE callback ----------
 
 class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice *d) override {
-        std::string mac  = d->getAddress().toString();
-        int         rssi = d->getRSSI();
-        uint8_t     at   = d->getAddressType();
+        Msg m{};
+        strncpy(m.mac, d->getAddress().toString().c_str(), sizeof(m.mac) - 1);
+        m.rssi      = (int8_t)d->getRSSI();
+        m.addr_type = d->getAddressType();
+        m.t_ms      = millis();
 
-        // Sanitize name to printable, JSON-safe ASCII.
-        std::string name;
         if (d->haveName()) {
             const std::string &raw = d->getName();
+            size_t out = 0;
             for (char c : raw) {
-                if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') name += c;
+                if (out >= sizeof(m.name) - 1) break;
+                if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') m.name[out++] = c;
             }
         }
 
-        // Manufacturer data: hex-encode first 16 bytes.
-        std::string manuf_hex;
         if (d->haveManufacturerData()) {
-            std::string m = d->getManufacturerData();
-            char buf[33] = {0};
-            size_t n = m.size() < 16 ? m.size() : 16;
+            std::string mstr = d->getManufacturerData();
+            size_t n = mstr.size() < 16 ? mstr.size() : 16;
             for (size_t i = 0; i < n; i++) {
-                snprintf(&buf[i * 2], 3, "%02x", (unsigned char)m[i]);
+                snprintf(&m.manuf[i * 2], 3, "%02x", (unsigned char)mstr[i]);
             }
-            manuf_hex = buf;
         }
 
-        std::lock_guard<std::mutex> g(g_obs_mu);
-        auto &e = g_obs[mac];
-        if (e.count == 0) {
-            e.first_ms  = millis();
-            e.name      = name;
-            e.manuf     = manuf_hex;
-            e.addr_type = at;
+        // Non-blocking. If the queue is full, drop. (The uplink task is too
+        // slow only when the network is down — at which point we'd accumulate
+        // forever anyway, so dropping is correct.)
+        if (xQueueSend(g_q, &m, 0) != pdTRUE) {
+            g_n_dropped++;
         }
-        e.last_ms = millis();
-        e.count++;
-        e.rssi_sum += rssi;
-        if (rssi < e.rssi_min) e.rssi_min = rssi;
-        if (rssi > e.rssi_max) e.rssi_max = rssi;
     }
 };
+
+// ---------- uplink task ----------
+
+static WiFiClient g_tcp;
+
+static bool uplink_connect() {
+    if (g_tcp.connected()) return true;
+    Serial.printf("[uplink] connecting to %s:%d...\n",
+                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+    if (!g_tcp.connect(MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT, 5000)) {
+        g_up = false;
+        return false;
+    }
+    g_tcp.setNoDelay(true);
+
+    char hello[160];
+    int n = snprintf(hello, sizeof(hello),
+                     "{\"event\":\"hello\",\"leaf\":\"%s\",\"version\":\"%s\"}\n",
+                     deviceHostname().c_str(), FW_VERSION);
+    g_tcp.write((const uint8_t *)hello, n);
+    g_up = true;
+    Serial.println("[uplink] connected, hello sent");
+    return true;
+}
+
+static void uplink_task(void * /*pv*/) {
+    Msg m;
+    uint32_t last_hb_ms = 0;
+    char line[512];
+
+    for (;;) {
+        if (!g_tcp.connected()) {
+            g_up = false;
+            g_tcp.stop();
+            if (!uplink_connect()) {
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                continue;
+            }
+        }
+
+        if (xQueueReceive(g_q, &m, pdMS_TO_TICKS(500)) == pdTRUE) {
+            int n = snprintf(
+                line, sizeof(line),
+                "{\"event\":\"obs\",\"mac\":\"%s\",\"rssi\":%d,\"addr_type\":%u,"
+                "\"name\":\"%s\",\"manuf\":\"%s\",\"t_ms\":%lu}\n",
+                m.mac, m.rssi, (unsigned)m.addr_type,
+                m.name, m.manuf, (unsigned long)m.t_ms);
+            int wrote = g_tcp.write((const uint8_t *)line, n);
+            if (wrote == n) {
+                g_n_sent++;
+            } else {
+                g_n_dropped++;
+                g_tcp.stop();  // force reconnect on next loop
+            }
+        }
+
+        uint32_t now = millis();
+        if (now - last_hb_ms > 5000) {
+            last_hb_ms = now;
+            int n = snprintf(
+                line, sizeof(line),
+                "{\"event\":\"hb\",\"up_s\":%lu,\"n_sent\":%lu,\"n_dropped\":%lu,"
+                "\"q_depth\":%d,\"heap\":%u,\"rssi\":%d}\n",
+                (unsigned long)(now / 1000),
+                (unsigned long)g_n_sent, (unsigned long)g_n_dropped,
+                (int)uxQueueMessagesWaiting(g_q),
+                (unsigned)ESP.getFreeHeap(),
+                WiFi.RSSI());
+            g_tcp.write((const uint8_t *)line, n);
+        }
+    }
+}
 
 // ---------- HTTP handlers ----------
 
 static void handleStatus() {
-    char body[400];
+    char body[480];
     snprintf(body, sizeof(body),
              "{\"hostname\":\"%s\",\"version\":\"%s\","
              "\"uptime_s\":%lu,\"rssi\":%d,\"free_heap\":%u,"
              "\"ip\":\"%s\",\"mac\":\"%s\","
-             "\"ble\":{\"n_unique\":%u,\"scan_window_ms\":%lu}}",
+             "\"uplink\":{\"connected\":%s,\"sent\":%lu,\"dropped\":%lu,"
+             "\"q_depth\":%d,\"host\":\"%s:%d\"}}",
              deviceHostname().c_str(), FW_VERSION,
              (unsigned long)(millis() / 1000UL),
              WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
              WiFi.localIP().toString().c_str(),
              WiFi.macAddress().c_str(),
-             (unsigned)g_obs.size(),
-             (unsigned long)(millis() - g_scan_start_ms));
+             g_up ? "true" : "false",
+             (unsigned long)g_n_sent, (unsigned long)g_n_dropped,
+             (int)uxQueueMessagesWaiting(g_q),
+             MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
     server.send(200, "application/json", body);
 }
 
@@ -134,63 +205,6 @@ static void handleRestart() {
     server.send(200, "application/json", "{\"status\":\"restarting\"}");
     delay(200);
     ESP.restart();
-}
-
-static void handleScanReset() {
-    std::lock_guard<std::mutex> g(g_obs_mu);
-    g_obs.clear();
-    g_scan_start_ms = millis();
-    char b[96];
-    snprintf(b, sizeof(b), "{\"status\":\"reset\",\"at_ms\":%lu}",
-             (unsigned long)g_scan_start_ms);
-    server.send(200, "application/json", b);
-}
-
-// Streamed JSON: a couple hundred entries × ~150 bytes each can exceed
-// 30 KB. Build it once in RAM is fine on the heap (~250 KB free typical),
-// but use chunked transfer to avoid the WebServer's Content-Length pre-
-// computation problem.
-static void handleScanResult() {
-    std::lock_guard<std::mutex> g(g_obs_mu);
-
-    uint32_t total = 0;
-    for (auto &kv : g_obs) total += kv.second.count;
-
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "application/json", "");
-
-    char hdr[280];
-    snprintf(hdr, sizeof(hdr),
-             "{\"hostname\":\"%s\",\"version\":\"%s\","
-             "\"now_ms\":%lu,\"scan_start_ms\":%lu,\"scan_window_ms\":%lu,"
-             "\"n_unique\":%u,\"n_total_obs\":%lu,"
-             "\"observations\":[",
-             deviceHostname().c_str(), FW_VERSION,
-             (unsigned long)millis(), (unsigned long)g_scan_start_ms,
-             (unsigned long)(millis() - g_scan_start_ms),
-             (unsigned)g_obs.size(), (unsigned long)total);
-    server.sendContent(hdr);
-
-    bool first = true;
-    char rec[512];
-    for (auto &kv : g_obs) {
-        const auto &e = kv.second;
-        snprintf(rec, sizeof(rec),
-                 "%s{\"mac\":\"%s\",\"addr_type\":%u,\"count\":%lu,"
-                 "\"rssi_min\":%d,\"rssi_max\":%d,\"rssi_avg\":%d,"
-                 "\"first_ms\":%lu,\"last_ms\":%lu,"
-                 "\"name\":\"%s\",\"manuf\":\"%s\"}",
-                 first ? "" : ",",
-                 kv.first.c_str(), (unsigned)e.addr_type,
-                 (unsigned long)e.count,
-                 e.rssi_min, e.rssi_max,
-                 (int)(e.rssi_sum / (int32_t)e.count),
-                 (unsigned long)e.first_ms, (unsigned long)e.last_ms,
-                 e.name.c_str(), e.manuf.c_str());
-        server.sendContent(rec);
-        first = false;
-    }
-    server.sendContent("]}");
 }
 
 // ---------- WiFi + OTA ----------
@@ -204,20 +218,18 @@ static void connectWiFi() {
         delay(500);
         Serial.print('.');
     }
-    Serial.printf("\n[wifi] %s  rssi=%d\n",
+    Serial.printf("\n[wifi] %s rssi=%d\n",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 static void startOTA() {
     ArduinoOTA.setHostname(deviceHostname().c_str());
     ArduinoOTA.onStart([] {
-        Serial.printf("[ota] start: %s\n",
-                      ArduinoOTA.getCommand() == U_FLASH ? "flash" : "spiffs");
-        // Stop BLE during OTA to free flash-write bandwidth and avoid
-        // weird BLE-stack-during-firmware-write interactions.
+        Serial.println("[ota] start");
         if (NimBLEDevice::getScan()->isScanning()) {
             NimBLEDevice::getScan()->stop();
         }
+        g_tcp.stop();
     });
     ArduinoOTA.onEnd([] { Serial.println("\n[ota] end"); });
     ArduinoOTA.onProgress([](unsigned int p, unsigned int t) {
@@ -229,19 +241,16 @@ static void startOTA() {
                   deviceHostname().c_str());
 }
 
-// ---------- BLE scan startup ----------
-
 static void startBLE() {
     NimBLEDevice::init("");
     auto *pScan = NimBLEDevice::getScan();
     pScan->setAdvertisedDeviceCallbacks(new ScanCB(), /*wantDup=*/true);
-    pScan->setActiveScan(true);   // request scan-response data (more name/mfg info)
-    pScan->setInterval(100);      // ms between scan windows
-    pScan->setWindow(99);         // dwell within each window
-    pScan->setMaxResults(0);      // don't accumulate in NimBLE's own buffer
-    g_scan_start_ms = millis();
-    pScan->start(0, nullptr, false);  // forever, no completion CB
-    Serial.println("[ble] scanner running (continuous, active)");
+    pScan->setActiveScan(true);
+    pScan->setInterval(100);
+    pScan->setWindow(99);
+    pScan->setMaxResults(0);
+    pScan->start(0, nullptr, false);
+    Serial.println("[ble] scanner running");
 }
 
 // ---------- main ----------
@@ -251,6 +260,13 @@ void setup() {
     delay(200);
     Serial.printf("\n=== mockingbird leaf %s booted, version %s ===\n",
                   deviceHostname().c_str(), FW_VERSION);
+
+    g_q = xQueueCreate(MSG_QUEUE_LEN, sizeof(Msg));
+    if (!g_q) {
+        Serial.println("[!] failed to create msg queue");
+        delay(2000);
+        ESP.restart();
+    }
 
     connectWiFi();
 
@@ -264,13 +280,16 @@ void setup() {
     startOTA();
     startBLE();
 
-    server.on("/",            HTTP_GET,  handleStatus);
-    server.on("/version",     HTTP_GET,  handleVersion);
-    server.on("/restart",     HTTP_POST, handleRestart);
-    server.on("/scan/reset",  HTTP_POST, handleScanReset);
-    server.on("/scan/result", HTTP_GET,  handleScanResult);
+    // Uplink task on core 1 (Arduino loop is core 1 too — fine, NimBLE uses
+    // core 0). Stack 4 KB is plenty for JSON-line formatting + a TCP write.
+    xTaskCreatePinnedToCore(uplink_task, "uplink", 4096, nullptr, 1, nullptr, 1);
+
+    server.on("/",        HTTP_GET,  handleStatus);
+    server.on("/version", HTTP_GET,  handleVersion);
+    server.on("/restart", HTTP_POST, handleRestart);
     server.begin();
-    Serial.println("[http] listening on :80");
+    Serial.printf("[http] :80 ready; streaming to %s:%d\n",
+                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
 }
 
 void loop() {

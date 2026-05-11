@@ -14,12 +14,15 @@ and the gotchas you must respect.
 
 The **Mockingbird** SSID (2.4 GHz, broadcast by the GL.iNet Opal at
 `192.168.8.1`) is the noahnet LAN at `192.168.8.0/24`. The **Pi** at
-`mockingbird-pi` runs Tailscale and advertises that subnet so the rest of
-Noah's tailnet can reach Mockingbird devices by their 192.168.8.x IP. The
-ESP32 leaves (`mockingbird-<chipid>.local`) join Mockingbird, run a small
-HTTP control surface, and accept ArduinoOTA push-flashes on UDP 3232. The
-Opal itself is a dumb WiFi-AP + NAT box; Tailscale does **not** run on it
-(see `CLAUDE.md` gotchas — won't fit in 16 MB flash).
+`mockingbird-pi` (a) runs Tailscale and advertises the subnet for the
+tailnet, and (b) runs the **mockingbird-collector** systemd service on
+TCP `:9001` that ingests a continuous stream of BLE observations from
+the leaves and persists them to `/home/pi/mockingbird/observations.sqlite`.
+The **ESP32 leaves** (`mockingbird-<chipid>.local`) join Mockingbird, run
+NimBLE continuous scanning, and **stream every observation as a line of
+JSON over TCP to the Pi** (firmware v0.3+, no on-device accumulation).
+They also expose a minimal HTTP API on `:80` (`/`, `/version`,
+`/restart`) plus ArduinoOTA on UDP `3232`.
 
 ## Default behavior — `/mockingbird` with no args
 
@@ -58,25 +61,22 @@ last seen at 192.168.8.244).
   works for key auth.
 
 - **`status <node>`** — `curl http://<node>/` for any ESP32, prints the JSON.
-  Status now includes a `ble` block — `n_unique` (devices seen since last
-  reset) and `scan_window_ms`.
+  Status now includes an `uplink` block — `connected`, `sent`, `dropped`,
+  `q_depth`, `host:port` (the collector it's streaming to).
 
-- **`ble`** [duration_s] — Run a coordinated BLE-capture experiment across
-  every reachable leaf. Just runs `bash ~/repos/mockingbird/scripts/ble-experiment.sh`,
-  which: discovers leaves on `192.168.8.0/24` by Espressif OUI in ARP →
-  POSTs `/scan/reset` to all of them simultaneously → waits the duration
-  (default 60 s) → pulls `/scan/result` from each into
-  `~/repos/.scratch/ble-captures/<chipid>-<timestamp>.json` → `scp`'s
-  them + `scripts/analyze_ble_capture.py` to the Pi → runs the analyzer
-  on **all** captured leaves (N-input). Output: per-leaf stats, coverage
-  histogram (singletons → universal), RSSI matrix sorted by best signal,
-  biggest-spread devices (most spatially-informative — each has a clear
-  "closest" leaf with an estimated distance ratio that cancels out the
-  unknown TxPower), per-leaf singleton contributions, what each leaf
-  sees most clearly, manufacturer breakdown, named-advertiser RSSI vector.
+- **`ble`** [window] — Query the Pi's observation DB for a recent window
+  and print the analysis. Just runs
+  `bash ~/repos/mockingbird/scripts/ble-experiment.sh`, which `scp`s the
+  analyzer to the Pi and runs it. Window: `60s` (default), `5m`, `1h`,
+  etc. Output: per-leaf rates + uplink health, coverage histogram
+  (singletons → universal), RSSI matrix, biggest-spread devices
+  (spatial info — distance-ratio is meaningful because the unknown
+  TxPower cancels), per-leaf singletons, what each leaf sees most clearly,
+  manufacturer breakdown, named-advertiser RSSI vector, and
+  **churn** (devices that appeared/disappeared crossing the window midpoint).
 
-- **`bleraw <node>`** — Just dump `GET /scan/result` JSON from one leaf
-  without resetting. Useful for inspecting a long-running scan window.
+- **`bleraw <node>`** — `curl http://<node>/` to see the uplink state of
+  one leaf (sent / dropped / q_depth / host).
 
 ## Files in the repo to know
 
@@ -84,11 +84,14 @@ last seen at 192.168.8.244).
 |---|---|
 | `CLAUDE.md` | live state, hardware inventory, gotchas, next-moves |
 | `firmware/esp32-wroom-mockingbird/` | PlatformIO project for the ESP32 leaves (Arduino framework, 4 MB flash, OTA-enabled) |
-| `firmware/esp32-wroom-mockingbird/src/main.cpp` | WiFi + ArduinoOTA + WebServer + NimBLE continuous scanner |
+| `firmware/esp32-wroom-mockingbird/src/main.cpp` | WiFi + ArduinoOTA + WebServer + NimBLE scanner + **TCP uplink** to the Pi collector |
+| `services/mockingbird-collector.py` | Pi-side asyncio TCP server on `:9001` that ingests the streamed obs and persists to SQLite |
+| `services/mockingbird-collector.service` | systemd unit for the collector (installed at `/etc/systemd/system/`, auto-restart) |
 | `scripts/gen-esp32-secrets.sh` | regenerates `src/secrets.h` from `~/repos/.scratch/mockingbird-wifi.txt` — never hand-edit secrets.h |
 | `scripts/bootstrap-pi-subnet-router.sh` | idempotent Pi setup (Tailscale install, Mockingbird WiFi connection, IP forwarding) |
-| `scripts/ble-experiment.sh` | runs the multi-leaf BLE capture pipeline (discover → reset → wait → pull → scp → analyze) |
-| `scripts/analyze_ble_capture.py` | N-input multi-leaf analyzer — coverage histogram, RSSI matrix, biggest-spread (spatial-info) devices, per-leaf singletons, named-advertiser table with full RSSI vector |
+| `scripts/ble-experiment.sh` | thin SSH wrapper that runs the SQLite-based analyzer on the Pi |
+| `scripts/analyze_ble_db.py` | **current** analyzer — reads from `~/mockingbird/observations.sqlite` on the Pi, accepts `--last 60s/5m/1h` or explicit `--from/--to` |
+| `scripts/analyze_ble_capture.py` | LEGACY — N-input analyzer for the old JSON-file capture pattern (v0.2.x). Kept for historic JSON files in `~/repos/.scratch/ble-captures/`. |
 | `main/` | ESP-IDF firmware *for future ESP32-S3 hardware*. Doesn't run on the current WROOM-32 leaves — wrong chip family. |
 
 ## Credentials map (paths only, never values)
