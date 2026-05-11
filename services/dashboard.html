@@ -319,6 +319,18 @@
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
   </div>
 
+  <h2>path-loss calibration</h2>
+  <div class="leaf" id="cal-panel">
+    <div class="leaf-status" id="cal-status">not calibrated yet — positions use weighted centroid</div>
+    <div id="cal-params" style="display:none; font-family: ui-monospace, monospace; font-size: 11px; color: #79c4ff; margin-top: 6px;"></div>
+    <button id="cal-run" style="margin-top: 8px">calibrate now</button>
+    <div class="leaf-status" style="font-size: 10px; margin-top: 6px; color: #6b7280">
+      Fits log-distance model from the last 30s of obs vs. positioned-leaf
+      geometry. With calibration, devices seen by ≥4 leaves use multilateration
+      instead of weighted centroid.
+    </div>
+  </div>
+
   <h2>leaves</h2>
   <div id="leaves">
     <!-- initial skeleton rows; replaced by JS when /api/leaves resolves -->
@@ -367,6 +379,10 @@
   <div class="live-summary">
     <div class="live-count" id="live-count">·</div>
     <div class="live-count-label">devices<br>in view</div>
+    <div style="text-align:center; font-size:10px; color:#6b7280; flex:1">
+      <div id="live-method" style="color:#79c4ff; font-family: ui-monospace, monospace; font-size:11px">centroid</div>
+      <div id="live-method-detail" style="margin-top:2px">positioning mode</div>
+    </div>
     <div class="live-asof" id="live-asof">—</div>
   </div>
 
@@ -1434,6 +1450,21 @@ async function pollLive() {
     liveCountEl.textContent = devs.length;
     const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
     liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
+    // Positioning method breakdown
+    const methodEl = document.getElementById('live-method');
+    const methodDetail = document.getElementById('live-method-detail');
+    if (methodEl && methodDetail) {
+      const ml = devs.filter(d => d.pos_method === 'multilat').length;
+      const ct = devs.filter(d => d.pos_method === 'centroid').length;
+      const total = devs.length;
+      if (r.calibration) {
+        methodEl.textContent = `multilat ${ml}/${total}`;
+        methodDetail.textContent = `${ct} fallback to centroid · n=${r.calibration.n}`;
+      } else {
+        methodEl.textContent = 'centroid';
+        methodDetail.textContent = 'no calibration · run in Setup';
+      }
+    }
     if (devs.length === 0) {
       // Wipe rows + show empty note (no input to disturb).
       for (const [tid, row] of liveRowByTrack) { row.remove(); }
@@ -1495,6 +1526,57 @@ function setTab(name) {
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => setTab(t.dataset.tab));
 });
+
+// ---- path-loss calibration ----
+const calStatusEl = document.getElementById('cal-status');
+const calParamsEl = document.getElementById('cal-params');
+const calRunBtn = document.getElementById('cal-run');
+
+function renderCalibration(c) {
+  if (!c || !c.calibrated) {
+    calStatusEl.textContent = 'not calibrated yet — positions use weighted centroid';
+    calParamsEl.style.display = 'none';
+    return;
+  }
+  calStatusEl.textContent = `calibrated · ${c.n_points} fit points across ${c.n_devices} devices`;
+  calParamsEl.style.display = 'block';
+  calParamsEl.innerHTML =
+    `P<sub>0</sub> = <b>${c.p0}</b> dBm @ 1m &nbsp;·&nbsp; ` +
+    `n = <b>${c.n}</b> &nbsp;·&nbsp; ` +
+    `RMSE = <b>${c.rmse_dbm}</b> dB &nbsp;·&nbsp; ` +
+    `fit ${Math.round(c.fit_age_s || 0)}s ago`;
+}
+
+async function refreshCalibration() {
+  try {
+    const r = await fetch('/api/calibration').then(r => r.json());
+    renderCalibration(r);
+  } catch (e) { /* swallow */ }
+}
+
+calRunBtn.addEventListener('click', async () => {
+  calRunBtn.disabled = true;
+  calRunBtn.textContent = 'fitting…';
+  try {
+    const r = await fetch('/api/calibrate', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'calibration failed', 'err');
+    } else {
+      renderCalibration({ ...j, fit_age_s: 0, calibrated: true });
+      toast(`calibrated · P₀=${j.p0} dBm, n=${j.n}, RMSE=${j.rmse_dbm} dB`);
+    }
+  } catch (e) {
+    toast('network error: ' + e.message, 'err');
+  } finally {
+    calRunBtn.disabled = false;
+    calRunBtn.textContent = 'recalibrate';
+  }
+});
+
+// Initial check on load, and re-check every 30s so the "fit age" updates.
+refreshCalibration();
+setInterval(refreshCalibration, 30000);
 
 // ---- view controls (camera mode + snap views) ----
 document.querySelectorAll('#view-controls [data-cam]').forEach(b => {
