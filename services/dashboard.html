@@ -47,6 +47,21 @@
   button:hover { background: #2a7cf5; }
   button.ghost:hover { background: #1c1f24; color: #cdd1d7; }
   .empty { color: #6b7280; font-style: italic; padding: 6px 0; }
+  .skel {
+    background: linear-gradient(90deg, #1c1f24 0%, #2a2f3a 40%, #2a2f3a 60%, #1c1f24 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s ease-in-out infinite;
+    border-radius: 3px; display: block;
+  }
+  @keyframes shimmer {
+    0%   { background-position:  200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .leaf.skel-row { border: 1px solid #232730; }
+  .skel-name  { width: 50%; height: 14px; }
+  .skel-loc   { width: 35%; height: 12px; margin-left: auto; }
+  .skel-status{ width: 65%; height: 10px; margin: 8px 0 6px; }
+  .skel-input { height: 26px; }
   #toast-host {
     position: fixed; right: 16px; bottom: 16px; z-index: 1000;
     display: flex; flex-direction: column; gap: 6px;
@@ -94,7 +109,37 @@
   </div>
 
   <h2>leaves</h2>
-  <div id="leaves"></div>
+  <div id="leaves">
+    <!-- initial skeleton rows; replaced by JS when /api/leaves resolves -->
+    <div class="leaf skel-row" data-skel>
+      <div class="leaf-head"><span class="skel skel-name"></span><span class="skel skel-loc"></span></div>
+      <div class="skel skel-status"></div>
+      <div class="row">
+        <span class="skel skel-input"></span><span class="skel skel-input"></span><span class="skel skel-input"></span>
+      </div>
+    </div>
+    <div class="leaf skel-row" data-skel>
+      <div class="leaf-head"><span class="skel skel-name"></span><span class="skel skel-loc"></span></div>
+      <div class="skel skel-status"></div>
+      <div class="row">
+        <span class="skel skel-input"></span><span class="skel skel-input"></span><span class="skel skel-input"></span>
+      </div>
+    </div>
+    <div class="leaf skel-row" data-skel>
+      <div class="leaf-head"><span class="skel skel-name"></span><span class="skel skel-loc"></span></div>
+      <div class="skel skel-status"></div>
+      <div class="row">
+        <span class="skel skel-input"></span><span class="skel skel-input"></span><span class="skel skel-input"></span>
+      </div>
+    </div>
+    <div class="leaf skel-row" data-skel>
+      <div class="leaf-head"><span class="skel skel-name"></span><span class="skel skel-loc"></span></div>
+      <div class="skel skel-status"></div>
+      <div class="row">
+        <span class="skel skel-input"></span><span class="skel skel-input"></span><span class="skel skel-input"></span>
+      </div>
+    </div>
+  </div>
 
   <div class="legend">
     <kbd>drag</kbd> rotate · <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> pan<br>
@@ -343,12 +388,19 @@ function renderLeaves(leaves) {
 const sideEl = document.getElementById('leaves');
 
 const renderedLeaves = new Set();  // names already rendered into the side panel
+let firstRender = true;
 function renderSide(leaves, { force = false } = {}) {
+  // Strip skeleton rows on the first real render (and on force).
+  if (firstRender || force) {
+    sideEl.querySelectorAll('[data-skel]').forEach(el => el.remove());
+  }
   if (force) { sideEl.innerHTML = ''; renderedLeaves.clear(); }
   if (leaves.length === 0 && renderedLeaves.size === 0) {
     sideEl.innerHTML = '<div class="empty">no leaves seen yet — flash one</div>';
+    firstRender = false;
     return;
   }
+  firstRender = false;
   // Update existing rows' read-only bits (status / location) without touching inputs.
   // Render fully only for leaves that don't have a row yet.
   for (const leaf of leaves) {
