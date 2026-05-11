@@ -384,12 +384,42 @@
   <div class="leaf" id="cal-panel">
     <div class="leaf-status" id="cal-status">not calibrated yet — positions use weighted centroid</div>
     <div id="cal-params" style="display:none; font-family: ui-monospace, monospace; font-size: 11px; color: #79c4ff; margin-top: 6px;"></div>
-    <button id="cal-run" style="margin-top: 8px">calibrate now</button>
+    <button id="cal-run" style="margin-top: 8px">refit from live data (bootstrap)</button>
     <div class="leaf-status" style="font-size: 10px; margin-top: 6px; color: #6b7280">
-      Fits log-distance model from the last 30s of obs vs. positioned-leaf
-      geometry. With calibration, devices seen by ≥4 leaves use multilateration
-      instead of weighted centroid.
+      With ≥3 calibration anchor points the fit uses those as ground truth
+      (preferred). Otherwise falls back to bootstrap-from-current-centroids.
     </div>
+
+    <h2 style="margin-top: 14px">calibration anchors</h2>
+    <div class="leaf-status" style="font-size: 11px; color: #cdd1d7">
+      Put a known device (e.g. your phone) at a known spot, then capture.
+      The system records RSSI at every leaf for 20 s and ties them to the
+      known position.
+    </div>
+    <div class="row" style="grid-template-columns: 1fr; margin-top: 8px">
+      <div>
+        <div class="leaf-status">reference device (from Live tab)</div>
+        <select id="cal-track-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
+      </div>
+    </div>
+    <div class="row" style="grid-template-columns: 1fr; margin-top: 8px">
+      <div>
+        <div class="leaf-status">at position (drop to leaf, or enter coords)</div>
+        <select id="cal-leaf-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px">
+          <option value="">— pick a leaf —</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top: 6px">
+      <input type="number" step="0.01" id="cal-x" placeholder="x">
+      <input type="number" step="0.01" id="cal-y" placeholder="y">
+      <input type="number" step="0.01" id="cal-z" placeholder="z">
+    </div>
+    <input type="text" id="cal-label" placeholder="label (optional, e.g. 'at desk leaf')" style="margin-top:6px">
+    <button id="cal-capture" style="margin-top: 8px">capture 20 s here</button>
+    <div id="cal-capture-status" style="font-size: 11px; color: #6b7280; margin-top: 6px"></div>
+
+    <div id="cal-anchor-list" style="margin-top: 10px"></div>
   </div>
 
   <h2>leaves</h2>
@@ -1774,6 +1804,142 @@ calRunBtn.addEventListener('click', async () => {
 // Initial check on load, and re-check every 30s so the "fit age" updates.
 refreshCalibration();
 setInterval(refreshCalibration, 30000);
+
+// ---- calibration anchor capture ----
+const calTrackSel = document.getElementById('cal-track-select');
+const calLeafSel  = document.getElementById('cal-leaf-select');
+const calXIn = document.getElementById('cal-x');
+const calYIn = document.getElementById('cal-y');
+const calZIn = document.getElementById('cal-z');
+const calLabel = document.getElementById('cal-label');
+const calCaptureBtn = document.getElementById('cal-capture');
+const calCaptureStatus = document.getElementById('cal-capture-status');
+const calAnchorList = document.getElementById('cal-anchor-list');
+
+// Build the leaf dropdown from /api/leaves; auto-fill x/y/z on selection.
+async function refreshCalLeafSelect() {
+  try {
+    const leaves = await fetch('/api/leaves').then(r => r.json());
+    const positioned = leaves.filter(L => L.x != null);
+    const cur = calLeafSel.value;
+    calLeafSel.innerHTML = '<option value="">— pick a leaf —</option>' +
+      positioned.map(L => {
+        const id = L.leaf.replace('mockingbird-', '');
+        const loc = L.location ? ` (${L.location})` : '';
+        return `<option value="${L.leaf}" data-x="${L.x}" data-y="${L.y}" data-z="${L.z}">at ${id}${loc} — (${L.x}, ${L.y}, ${L.z})</option>`;
+      }).join('');
+    if (cur) calLeafSel.value = cur;
+  } catch (e) { /* silent */ }
+}
+calLeafSel.addEventListener('change', () => {
+  const opt = calLeafSel.options[calLeafSel.selectedIndex];
+  if (opt && opt.dataset.x) {
+    calXIn.value = opt.dataset.x;
+    calYIn.value = opt.dataset.y;
+    calZIn.value = opt.dataset.z;
+  }
+});
+
+// Build the track dropdown from last /api/live snapshot in memory.
+function refreshCalTrackSelect() {
+  const cur = calTrackSel.value;
+  const opts = [...deviceByTrack.entries()]
+    .filter(([_tid, e]) => e.lastDevice)
+    .map(([tid, e]) => {
+      const d = e.lastDevice;
+      return `<option value="${d.mac}" data-tid="${tid}" data-name="${getName(d)}">${getName(d)} · ${d.mac.slice(-11)} · ${e.rssi} dBm</option>`;
+    });
+  calTrackSel.innerHTML = '<option value="">— pick a device —</option>' + opts.join('');
+  if (cur) calTrackSel.value = cur;
+}
+// Refresh dropdowns when the tab is opened + every 5s.
+setInterval(() => {
+  if (document.getElementById('setup-pane').classList.contains('active')) {
+    refreshCalLeafSelect();
+    refreshCalTrackSelect();
+    refreshCalAnchorList();
+  }
+}, 5000);
+refreshCalLeafSelect();
+refreshCalAnchorList();
+
+calCaptureBtn.addEventListener('click', async () => {
+  const mac = calTrackSel.value;
+  if (!mac) return toast('pick a device first', 'err');
+  const x = parseFloat(calXIn.value), y = parseFloat(calYIn.value), z = parseFloat(calZIn.value);
+  if ([x, y, z].some(v => Number.isNaN(v))) return toast('need x, y, z', 'err');
+  const opt = calTrackSel.options[calTrackSel.selectedIndex];
+  const body = {
+    mac, x, y, z,
+    duration_s: 20,
+    track_id: opt.dataset.tid || null,
+    track_name: opt.dataset.name || null,
+    label: calLabel.value || null,
+  };
+  calCaptureBtn.disabled = true;
+  calCaptureBtn.textContent = 'capturing…';
+  try {
+    const r = await fetch('/api/calibrate_at', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'capture failed', 'err');
+    } else {
+      toast(`capturing ${opt.dataset.name || mac.slice(-8)} at (${x},${y},${z}) for ${j.duration_s}s`);
+      // Progress UI
+      let elapsed = 0;
+      const tick = setInterval(() => {
+        elapsed += 1;
+        if (elapsed >= j.duration_s) {
+          clearInterval(tick);
+          calCaptureBtn.disabled = false;
+          calCaptureBtn.textContent = 'capture 20 s here';
+          calCaptureStatus.textContent = '✓ capture complete';
+          refreshCalAnchorList();
+          toast('anchor recorded — fit will use it next time you click refit', 'ok');
+          return;
+        }
+        calCaptureStatus.textContent = `recording… ${elapsed}/${j.duration_s}s`;
+      }, 1000);
+    }
+  } catch (e) {
+    toast('network: ' + e.message, 'err');
+    calCaptureBtn.disabled = false;
+    calCaptureBtn.textContent = 'capture 20 s here';
+  }
+});
+
+async function refreshCalAnchorList() {
+  try {
+    const r = await fetch('/api/calibration_points').then(r => r.json());
+    const pts = r.points || [];
+    if (!pts.length) {
+      calAnchorList.innerHTML = '<div class="empty" style="font-size:11px">no anchors yet — capture one above</div>';
+      return;
+    }
+    calAnchorList.innerHTML = `
+      <div class="leaf-status" style="margin-top: 8px">${pts.length} anchor point${pts.length===1?'':'s'} recorded</div>
+      ${pts.map(p => `
+        <div class="leaf" style="padding: 6px 10px; margin-bottom: 4px; font-size: 11px; display: flex; align-items: center; gap: 8px">
+          <span style="font-family: ui-monospace, monospace; color:#79c4ff">(${p.x}, ${p.y}, ${p.z})</span>
+          <span style="color: #6b7280">${p.track_name || p.mac.slice(-11)}</span>
+          <span style="flex: 1; color: #6b7280">${p.label || ''}</span>
+          ${p.in_progress
+            ? `<span class="stale" style="font-size:10px">${Math.round(p.duration_s - p.elapsed_s)}s left</span>`
+            : `<button class="ghost" data-cal-del="${p.id}" style="margin:0;padding:2px 8px;font-size:10px">×</button>`}
+        </div>
+      `).join('')}
+    `;
+    calAnchorList.querySelectorAll('[data-cal-del]').forEach(b =>
+      b.addEventListener('click', async () => {
+        await fetch('/api/calibration_points/' + b.dataset.calDel, { method: 'DELETE' });
+        refreshCalAnchorList();
+        toast('anchor deleted', 'warn');
+      }));
+  } catch (e) { /* silent */ }
+}
 
 // ---- view controls (camera mode + snap views) ----
 document.querySelectorAll('#view-controls [data-cam]').forEach(b => {

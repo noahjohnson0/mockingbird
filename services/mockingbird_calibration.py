@@ -84,21 +84,104 @@ def _device_centroid(rssi_per_leaf: dict[str, int],
     return (nx / denom, ny / denom, nz / denom)
 
 
+def _harvest_calibration_points(db: sqlite3.Connection,
+                                positions: dict[str, tuple[float, float, float]],
+                                min_rssi: int,
+                                min_distance_m: float,
+                                max_distance_m: float,
+                                ) -> tuple[list[float], list[float], int]:
+    """Pull (rssi, log10_distance) pairs from completed calibration anchor
+    points. These are ground truth — the device's position is *known*,
+    not centroid-estimated — so each pair gets the model fit honestly.
+
+    Returns (xs, ys, n_points) for use in linear regression.
+    xs is -10*log10(d), ys is rssi.
+    """
+    now = time.time()
+    xs: list[float] = []
+    ys: list[float] = []
+    n_points = 0
+    try:
+        rows = db.execute(
+            "SELECT id, ts_start, ts_end, mac, x, y, z FROM calibration_points "
+            "WHERE ts_end <= ? ORDER BY ts_start DESC LIMIT 100",
+            (now,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ([], [], 0)
+    for _cid, ts_start, ts_end, mac, px, py, pz in rows:
+        if ts_end <= ts_start:
+            continue
+        leaf_obs = db.execute(
+            "SELECT leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+            "WHERE ts >= ? AND ts <= ? AND mac = ? GROUP BY leaf",
+            (ts_start, ts_end, mac),
+        ).fetchall()
+        if len(leaf_obs) < 2:
+            continue
+        n_points += 1
+        for leaf, rssi in leaf_obs:
+            if leaf not in positions or rssi < min_rssi:
+                continue
+            lx, ly, lz = positions[leaf]
+            d = math.sqrt((px - lx) ** 2 + (py - ly) ** 2 + (pz - lz) ** 2)
+            if d < min_distance_m or d > max_distance_m:
+                continue
+            xs.append(-10.0 * math.log10(d))
+            ys.append(rssi)
+    return (xs, ys, n_points)
+
+
 def fit_pathloss(db: sqlite3.Connection,
                  positions: dict[str, tuple[float, float, float]],
                  window_s: int = 30,
                  iterate: int = 2,
                  min_rssi: int = -85,
-                 min_distance_m: float = 0.5,
+                 min_distance_m: float = 0.3,
                  max_distance_m: float = 12.0) -> CalibrationParams | None:
-    """Fit P0, n to recent observations. positions maps leaf_id → (x,y,z).
+    """Fit P0, n. Prefers ground-truth calibration anchor points when
+    available; falls back to bootstrap-from-centroid otherwise.
 
-    Returns CalibrationParams or None if too little data to fit.
+    positions maps leaf_id → (x,y,z). Returns CalibrationParams or None
+    if too little data.
     """
     if len(positions) < 3:
         return None
     now = time.time()
 
+    # ---- Path 1: ground-truth calibration points ----
+    # If the user has captured ≥3 calibration anchors, fit DIRECTLY from
+    # those (rssi, real-distance) pairs. No bootstrap, no centroid bias,
+    # no iterative refinement needed.
+    cxs, cys, n_anchors = _harvest_calibration_points(
+        db, positions, min_rssi, min_distance_m, max_distance_m,
+    )
+    if n_anchors >= 3 and len(cxs) >= 8:
+        p0, n = _linear_fit(cxs, cys)
+        if p0 is None:
+            return None
+        # Drop top 15% residuals (multipath outliers) and refit.
+        resids = [(abs(y - (p0 + n * x)), x, y) for x, y in zip(cxs, cys)]
+        resids.sort()
+        keep = resids[: int(len(resids) * 0.85)]
+        cxs_k = [r[1] for r in keep]
+        cys_k = [r[2] for r in keep]
+        if len(cxs_k) >= 8:
+            p0k, nk = _linear_fit(cxs_k, cys_k)
+            if p0k is not None:
+                p0, n = p0k, nk
+        N_INDOOR_MIN, N_INDOOR_MAX = 1.8, 5.0
+        if not (N_INDOOR_MIN <= n <= N_INDOOR_MAX):
+            n = min(N_INDOOR_MAX, max(N_INDOOR_MIN, 2.5))
+            p0 = sum(y - n * x for x, y in zip(cxs_k, cys_k)) / len(cxs_k)
+        residuals = [y - (p0 + n * x) for x, y in zip(cxs_k, cys_k)]
+        rmse = math.sqrt(sum(r * r for r in residuals) / len(residuals))
+        return CalibrationParams(
+            p0=round(p0, 2), n=round(n, 3), rmse_dbm=round(rmse, 2),
+            n_points=len(cxs_k), n_devices=n_anchors, fit_ts=now,
+        )
+
+    # ---- Path 2: bootstrap from current observation centroids ----
     # Pull recent obs, aggregate (device, leaf) → max(rssi) in Python
     leaf_names = list(positions.keys())
     placeholders = ",".join("?" * len(leaf_names))

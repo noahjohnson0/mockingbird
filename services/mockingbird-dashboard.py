@@ -243,6 +243,22 @@ def _init_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE room ADD COLUMN is_ground_floor INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    # Calibration anchor points — user puts a known device at a known
+    # position and asks us to "remember the RSSI signature here." During
+    # fitting we use these as ground truth instead of bootstrap centroids.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS calibration_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_start   REAL NOT NULL,
+            ts_end     REAL NOT NULL,
+            mac        TEXT NOT NULL,
+            track_id   TEXT,
+            track_name TEXT,
+            x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL,
+            label TEXT,
+            created_ts REAL DEFAULT (strftime('%s','now'))
+        )
+    """)
 
 
 def open_db() -> sqlite3.Connection:
@@ -405,6 +421,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             leaves_list = sorted(seen.values(),
                                  key=lambda x: (order.get(x["status"], 9), x["leaf"]))
             return self._json({"as_of": now, "pi": pi, "leaves": leaves_list})
+
+        if url.path == "/api/calibration_points":
+            db = open_db()
+            now = time.time()
+            rows = db.execute(
+                "SELECT id, ts_start, ts_end, mac, track_id, track_name, "
+                "x, y, z, label FROM calibration_points ORDER BY ts_start DESC"
+            ).fetchall()
+            points = []
+            for r in rows:
+                in_progress = now < r[2]
+                points.append({
+                    "id": r[0],
+                    "ts_start": r[1], "ts_end": r[2],
+                    "in_progress": in_progress,
+                    "elapsed_s": round(now - r[1], 1),
+                    "duration_s": round(r[2] - r[1], 1),
+                    "mac": r[3], "track_id": r[4], "track_name": r[5],
+                    "x": r[6], "y": r[7], "z": r[8],
+                    "label": r[9],
+                })
+            return self._json({"points": points})
 
         if url.path == "/api/calibration":
             cal = CALIBRATION
@@ -594,6 +632,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urlparse(self.path)
+        if url.path == "/api/calibrate_at":
+            try:
+                msg = json.loads(self._read_body() or "{}")
+                mac = msg["mac"]
+                x = float(msg["x"]); y = float(msg["y"]); z = float(msg["z"])
+                duration = float(msg.get("duration_s") or 20.0)
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                return self._json({"error": "need mac + x + y + z"}, 400)
+            if duration < 5 or duration > 120:
+                return self._json({"error": "duration must be 5–120 s"}, 400)
+            if not re.match(r"^[0-9a-fA-F:]{12,17}$", mac):
+                return self._json({"error": "bad mac"}, 400)
+            track_id = msg.get("track_id")
+            track_name = msg.get("track_name")
+            label = (msg.get("label") or "")[:80] or None
+            db = open_db()
+            now = time.time()
+            cur = db.execute(
+                "INSERT INTO calibration_points(ts_start, ts_end, mac, track_id, "
+                "track_name, x, y, z, label) VALUES (?,?,?,?,?,?,?,?,?)",
+                (now, now + duration, mac, track_id, track_name, x, y, z, label),
+            )
+            return self._json({
+                "id": cur.lastrowid, "ts_start": now, "ts_end": now + duration,
+                "duration_s": duration, "in_progress": True,
+            })
+
         if url.path == "/api/calibrate":
             global CALIBRATION
             db = open_db()
@@ -665,7 +730,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if m:
             db = open_db()
             db.execute("DELETE FROM leaf_position WHERE leaf=?", (m.group(1),))
-            _CACHE.pop("leaves", None)
+            return self._json({"status": "ok"})
+        m = re.match(r"^/api/calibration_points/(\d+)$", url.path)
+        if m:
+            db = open_db()
+            db.execute("DELETE FROM calibration_points WHERE id=?", (int(m.group(1)),))
             return self._json({"status": "ok"})
         return self._send(404, b"not found", "text/plain")
 
