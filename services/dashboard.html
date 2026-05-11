@@ -199,7 +199,8 @@
   <div class="legend">
     <kbd>drag</kbd> rotate · <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> pan<br>
     Refresh every 5 s. Updates persist to <code>leaf_position</code> in SQLite.<br>
-    <span style="color:#fbbf24">●</span> origin marker · grid = 1 m squares
+    <span style="color:#fbbf24">●</span> origin · ◆ leaves (rotating diamonds) · ● devices (Live tab)<br>
+    grid = 1 m squares
   </div>
 </div><!-- /setup-pane -->
 
@@ -500,10 +501,19 @@ function tickDeviceAnimation() {
   }
 }
 
+// Slowly rotate the leaf diamonds so their facets catch the light —
+// adds motion that distinguishes them from static spheres of any kind.
+function tickLeafRotation() {
+  for (const e of leavesByName.values()) {
+    e.mesh.rotation.y += 0.005;
+  }
+}
+
 // Render loop
 function loop() {
   requestAnimationFrame(loop);
   controls.update();
+  tickLeafRotation();
   tickDeviceAnimation();
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
@@ -525,10 +535,30 @@ function ensureLeafMesh(leaf, idx) {
   let entry = leavesByName.get(leaf.leaf);
   if (!entry) {
     const color = COLORS[idx % COLORS.length];
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 24, 16),
-      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.25, roughness: 0.4 })
+    // Leaves are octahedrons (diamonds) — visually distinct from the
+    // device spheres in the Live view. Reads as "fixed sensor anchor"
+    // vs "moving particle." Slightly larger than devices (0.16 vs 0.08).
+    const mesh = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.16, 0),
+      new THREE.MeshStandardMaterial({
+        color, emissive: color, emissiveIntensity: 0.3,
+        roughness: 0.3, metalness: 0.2, flatShading: true,
+      })
     );
+    // Wireframe overlay sharpens the diamond silhouette
+    const wire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(mesh.geometry),
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 })
+    );
+    mesh.add(wire);
+    // Small base disc so it feels grounded in the room
+    const disc = new THREE.Mesh(
+      new THREE.RingGeometry(0.05, 0.18, 24),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })
+    );
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.y = -0.18;
+    mesh.add(disc);
     const labelEl = document.createElement('div');
     labelEl.style.cssText = `
       background: rgba(20,22,26,0.85); color: #e6e9ef;
@@ -537,10 +567,10 @@ function ensureLeafMesh(leaf, idx) {
       border: 1px solid #2a2e36; white-space: nowrap;
     `;
     const label = new CSS2DObject(labelEl);
-    label.position.set(0, 0.22, 0);
-    sphere.add(label);
-    leafGroup.add(sphere);
-    entry = { sphere, labelEl, color };
+    label.position.set(0, 0.26, 0);
+    mesh.add(label);
+    leafGroup.add(mesh);
+    entry = { mesh, labelEl, color };
     leavesByName.set(leaf.leaf, entry);
   }
   return entry;
@@ -550,13 +580,13 @@ function renderLeaves(leaves) {
   // Remove ones no longer present
   const live = new Set(leaves.map(l => l.leaf));
   for (const [name, entry] of leavesByName) {
-    if (!live.has(name)) { leafGroup.remove(entry.sphere); leavesByName.delete(name); }
+    if (!live.has(name)) { leafGroup.remove(entry.mesh); leavesByName.delete(name); }
   }
   // Place positioned ones
   leaves.forEach((leaf, idx) => {
     if (leaf.x === null || leaf.x === undefined) return; // unpositioned: skip 3D
     const entry = ensureLeafMesh(leaf, idx);
-    entry.sphere.position.set(leaf.x, leaf.z, leaf.y);
+    entry.mesh.position.set(leaf.x, leaf.z, leaf.y);
     const loc = leaf.location ? ` · ${leaf.location}` : '';
     entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${loc}`;
   });
@@ -629,9 +659,9 @@ function renderSide(leaves, { force = false } = {}) {
           body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
         });
         if (r.ok) {
-          // Optimistic 3D update: move the sphere immediately, no re-render.
+          // Optimistic 3D update: move the diamond immediately, no re-render.
           const entry = ensureLeafMesh(leaf, idx);
-          entry.sphere.position.set(x, z, y);
+          entry.mesh.position.set(x, z, y);
           // Make the status pill say "positioned" if it wasn't already
           const status = div.querySelector('.leaf-status');
           if (status) status.textContent = `positioned · ${leaf.location ? 'online' : 'online'}`;
