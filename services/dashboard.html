@@ -2151,18 +2151,36 @@ async function adIdentify() {
       adGo.textContent = 'Identify phone';
       return;
     }
-    // Top candidates with action button
+    // Top candidates with action button. Highlight the top one prominently
+    // because that's almost always the right answer.
     adResultsEl.innerHTML = `
-      <div class="leaf-status" style="margin-top:8px">candidates (top by # of distinct leaves):</div>
-      ${cands.slice(0, 6).map(c => `
-        <div style="background: #0c0d10; padding: 6px 10px; margin-top: 4px; border-radius: 4px; display:flex; gap:8px; align-items:center; font-size: 11px">
-          <span style="font-family: ui-monospace, monospace; color: #79c4ff; min-width: 95px">${c.mac.slice(-11)}</span>
-          <span style="flex:1; color: #cdd1d7">${c.track_name || '(no track)'}</span>
-          <span style="color: #6b7280">${c.n_distinct_leaves}/${j.n_visits} leaves · best ${c.best_rssi} dBm</span>
-          <button class="ad-pick" data-mac="${c.mac}" data-tid="${c.track_id || ''}" data-name="${c.track_name || ''}" style="margin:0; padding:3px 8px; font-size:10px">use</button>
-        </div>
-      `).join('')}
+      <div class="leaf-status" style="margin-top: 12px; font-size: 12px; color: #cdd1d7; font-weight: 600">
+        ✓ candidates — top is your phone:
+      </div>
+      ${cands.slice(0, 6).map((c, i) => {
+        const isTop = i === 0;
+        return `
+        <div style="
+          background: ${isTop ? '#1a2230' : '#0c0d10'};
+          padding: 10px 12px;
+          margin-top: 6px;
+          border-radius: 6px;
+          border: ${isTop ? '2px solid #1d6fef' : '1px solid #232730'};
+          display: flex; gap: 8px; align-items: center; font-size: 11px;
+        ">
+          <span style="font-family: ui-monospace, monospace; color: #79c4ff; font-weight: ${isTop ? 700 : 400}; min-width: 95px">${c.mac.slice(-11)}</span>
+          <span style="flex: 1; color: #cdd1d7; font-weight: ${isTop ? 600 : 400}">${c.track_name || '(no current track)'}</span>
+          <span style="color: #6b7280; font-size: 10px">${c.n_distinct_leaves}/${j.n_visits} · ${c.best_rssi}dBm</span>
+          <button class="ad-pick" data-mac="${c.mac}" data-tid="${c.track_id || ''}" data-name="${c.track_name || ''}"
+            style="margin: 0; padding: 6px 14px; font-size: 12px; font-weight: 600; background: ${isTop ? '#1d6fef' : '#2a3340'}; color: white">
+            ${isTop ? '✓ use this' : 'use'}
+          </button>
+        </div>`;
+      }).join('')}
     `;
+    // Scroll results into view (especially needed in voice mode where the
+    // user may have been watching the 3D scene, not the side panel).
+    setTimeout(() => adResultsEl.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
     adResultsEl.querySelectorAll('.ad-pick').forEach(b => {
       b.addEventListener('click', () => {
         // Force-add this MAC option into the cal-track-select even if no current track
