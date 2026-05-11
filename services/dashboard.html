@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mockingbird · room</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex;
+    background: #0c0d10; color: #cdd1d7;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  #scene { flex: 1; min-width: 0; }
+  #side {
+    width: 380px; padding: 16px; overflow-y: auto;
+    background: #14161a; border-left: 1px solid #1f2227;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; color: #fff; }
+  .sub { color: #6b7280; font-size: 12px; margin-bottom: 12px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin: 16px 0 6px; }
+  .leaf {
+    background: #1c1f24; border-radius: 6px; padding: 10px; margin-bottom: 8px;
+    border: 1px solid #232730;
+  }
+  .leaf.unpos { opacity: 0.55; border-style: dashed; }
+  .leaf-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .leaf-name { font-weight: 600; color: #e6e9ef; font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+  .leaf-loc { color: #79c4ff; font-size: 12px; }
+  .leaf-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .leaf-status { font-size: 11px; color: #6b7280; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 6px; }
+  input[type="number"], input[type="text"] {
+    width: 100%; background: #0c0d10; color: #e6e9ef; border: 1px solid #2a2e36;
+    border-radius: 4px; padding: 4px 6px; font: 12px ui-monospace, "SF Mono", monospace;
+  }
+  input[type="text"] { font-family: inherit; }
+  button {
+    background: #1d6fef; color: white; border: 0; border-radius: 4px;
+    padding: 5px 10px; font-size: 12px; cursor: pointer; margin-top: 6px;
+  }
+  button.ghost { background: transparent; color: #6b7280; }
+  button:hover { background: #2a7cf5; }
+  button.ghost:hover { background: #1c1f24; color: #cdd1d7; }
+  .empty { color: #6b7280; font-style: italic; padding: 6px 0; }
+  .legend { margin-top: 12px; font-size: 11px; color: #6b7280; line-height: 1.6; }
+  .legend kbd {
+    background: #1c1f24; padding: 1px 6px; border-radius: 3px;
+    font-family: ui-monospace; font-size: 10px; color: #cdd1d7;
+  }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<div id="side">
+  <h1>mockingbird · room</h1>
+  <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
+
+  <h2>room</h2>
+  <div id="room-panel" class="leaf">
+    <div class="leaf-status">dimensions in metres (W × D × H)</div>
+    <div class="row">
+      <input type="number" step="0.01" id="room-w" placeholder="width">
+      <input type="number" step="0.01" id="room-d" placeholder="depth">
+      <input type="number" step="0.01" id="room-h" placeholder="height">
+    </div>
+    <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
+    <button id="room-save">save</button>
+  </div>
+
+  <h2>leaves</h2>
+  <div id="leaves"></div>
+
+  <div class="legend">
+    <kbd>drag</kbd> rotate · <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> pan<br>
+    Refresh every 5 s. Updates persist to <code>leaf_position</code> in SQLite.<br>
+    <span style="color:#fbbf24">●</span> origin marker · grid = 1 m squares
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three":           "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/":   "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const sceneEl = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+sceneEl.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.domElement.style.position = 'absolute';
+labelRenderer.domElement.style.top = '0';
+labelRenderer.domElement.style.pointerEvents = 'none';
+sceneEl.appendChild(labelRenderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0c0d10);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
+camera.position.set(5, 4, 5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(2, 1, 2);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(6, 10, 4);
+scene.add(sun);
+
+// Floor grid (1m squares, fades into the wall planes)
+const grid = new THREE.GridHelper(20, 20, 0x39414f, 0x1c2129);
+scene.add(grid);
+
+// Axes (X red, Y green, Z blue — Three.js convention; we'll relabel via DOM)
+const axes = new THREE.AxesHelper(1.0);
+scene.add(axes);
+
+// ---- room walls (built/rebuilt when dimensions change) ----
+const roomGroup = new THREE.Group();
+scene.add(roomGroup);
+let roomDims = null;  // {W, D, H}
+
+function rebuildRoom(w, d, h) {
+  while (roomGroup.children.length) roomGroup.remove(roomGroup.children[0]);
+  if (!w || !d || !h) return;
+
+  // Floor (slightly darker than the grid)
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, d),
+    new THREE.MeshStandardMaterial({ color: 0x14181f, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(w / 2, 0.001, d / 2);
+  roomGroup.add(floor);
+
+  // Wall material: translucent, slightly bluish
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0x4a5b78, side: THREE.DoubleSide,
+    transparent: true, opacity: 0.10, depthWrite: false,
+  });
+  const wallEdgeMat = new THREE.LineBasicMaterial({ color: 0x4a5b78, transparent: true, opacity: 0.5 });
+
+  function addWall(geom, x, y, z, rx = 0, ry = 0) {
+    const m = new THREE.Mesh(geom, wallMat);
+    m.position.set(x, y, z); m.rotation.x = rx; m.rotation.y = ry;
+    roomGroup.add(m);
+    // Edge outline
+    const edges = new THREE.EdgesGeometry(geom);
+    const line = new THREE.LineSegments(edges, wallEdgeMat);
+    line.position.copy(m.position); line.rotation.copy(m.rotation);
+    roomGroup.add(line);
+  }
+  // Walls at x=0 and x=w (room x → three.x)
+  addWall(new THREE.PlaneGeometry(d, h), 0, h / 2, d / 2, 0, Math.PI / 2);
+  addWall(new THREE.PlaneGeometry(d, h), w, h / 2, d / 2, 0, -Math.PI / 2);
+  // Walls at y=0 and y=d (room y → three.z)
+  addWall(new THREE.PlaneGeometry(w, h), w / 2, h / 2, 0, 0, 0);
+  addWall(new THREE.PlaneGeometry(w, h), w / 2, h / 2, d, 0, Math.PI);
+  // Ceiling (very faint)
+  const ceil = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, d),
+    new THREE.MeshStandardMaterial({ color: 0x4a5b78, side: THREE.DoubleSide, transparent: true, opacity: 0.05 })
+  );
+  ceil.rotation.x = -Math.PI / 2; ceil.position.set(w / 2, h, d / 2);
+  roomGroup.add(ceil);
+
+  // Recenter camera target on room midpoint
+  controls.target.set(w / 2, h / 2, d / 2);
+  controls.update();
+}
+
+// Origin marker (yellow sphere)
+const origin = new THREE.Mesh(
+  new THREE.SphereGeometry(0.08, 24, 16),
+  new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0x553a00, roughness: 0.5 })
+);
+scene.add(origin);
+
+function fit() {
+  const w = sceneEl.clientWidth, h = sceneEl.clientHeight;
+  renderer.setSize(w, h);
+  labelRenderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', fit);
+fit();
+
+// Render loop
+function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+loop();
+
+// ---- leaves ----
+// Three.js uses Y-up. We map (x_room, y_room, z_room) → (x, z, y) in three:
+//   x_room   → three.x (right)
+//   y_room   → three.z (forward away from viewer)
+//   z_room   → three.y (up)
+const COLORS = [0x60a5fa, 0xa78bfa, 0xf472b6, 0x34d399, 0xfb923c, 0x22d3ee, 0xfbbf24, 0xf87171];
+
+const leafGroup = new THREE.Group();
+scene.add(leafGroup);
+const leavesByName = new Map();
+
+function ensureLeafMesh(leaf, idx) {
+  let entry = leavesByName.get(leaf.leaf);
+  if (!entry) {
+    const color = COLORS[idx % COLORS.length];
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 24, 16),
+      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.25, roughness: 0.4 })
+    );
+    const labelEl = document.createElement('div');
+    labelEl.style.cssText = `
+      background: rgba(20,22,26,0.85); color: #e6e9ef;
+      font: 11px ui-monospace, "SF Mono", monospace;
+      padding: 3px 6px; border-radius: 4px;
+      border: 1px solid #2a2e36; white-space: nowrap;
+    `;
+    const label = new CSS2DObject(labelEl);
+    label.position.set(0, 0.22, 0);
+    sphere.add(label);
+    leafGroup.add(sphere);
+    entry = { sphere, labelEl, color };
+    leavesByName.set(leaf.leaf, entry);
+  }
+  return entry;
+}
+
+function renderLeaves(leaves) {
+  // Remove ones no longer present
+  const live = new Set(leaves.map(l => l.leaf));
+  for (const [name, entry] of leavesByName) {
+    if (!live.has(name)) { leafGroup.remove(entry.sphere); leavesByName.delete(name); }
+  }
+  // Place positioned ones
+  leaves.forEach((leaf, idx) => {
+    if (leaf.x === null || leaf.x === undefined) return; // unpositioned: skip 3D
+    const entry = ensureLeafMesh(leaf, idx);
+    entry.sphere.position.set(leaf.x, leaf.z, leaf.y);
+    const loc = leaf.location ? ` · ${leaf.location}` : '';
+    entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${loc}`;
+  });
+}
+
+// ---- side panel ----
+const sideEl = document.getElementById('leaves');
+
+function renderSide(leaves) {
+  sideEl.innerHTML = '';
+  if (leaves.length === 0) {
+    sideEl.innerHTML = '<div class="empty">no leaves seen yet — flash one</div>';
+    return;
+  }
+  leaves.forEach((leaf, idx) => {
+    const pos = leaf.x !== null && leaf.x !== undefined;
+    const entry = ensureLeafMesh(leaf, idx);
+    const div = document.createElement('div');
+    div.className = 'leaf' + (pos ? '' : ' unpos');
+    const colorHex = '#' + entry.color.toString(16).padStart(6, '0');
+    div.innerHTML = `
+      <div class="leaf-head">
+        <div class="leaf-name"><span class="leaf-dot" style="background:${colorHex}"></span>${leaf.leaf.replace('mockingbird-', '')}</div>
+        <div class="leaf-loc">${leaf.location || ''}</div>
+      </div>
+      <div class="leaf-status">${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}</div>
+      <div class="row">
+        <input type="number" step="0.01" name="x" placeholder="x" value="${pos ? leaf.x : ''}">
+        <input type="number" step="0.01" name="y" placeholder="y" value="${pos ? leaf.y : ''}">
+        <input type="number" step="0.01" name="z" placeholder="z" value="${pos ? leaf.z : ''}">
+      </div>
+      <input type="text" name="notes" placeholder="notes (optional)" value="${leaf.notes || ''}" style="margin-top:6px">
+      <button data-leaf="${leaf.leaf}">save</button>
+      ${pos ? `<button class="ghost" data-clear="${leaf.leaf}">clear</button>` : ''}
+    `;
+    sideEl.appendChild(div);
+
+    div.querySelector('button[data-leaf]').addEventListener('click', async () => {
+      const inputs = div.querySelectorAll('input');
+      const [x, y, z] = [inputs[0].value, inputs[1].value, inputs[2].value].map(parseFloat);
+      const notes = inputs[3].value;
+      if ([x, y, z].some(v => Number.isNaN(v))) return alert('x/y/z must be numbers');
+      const r = await fetch('/api/leaves', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
+      });
+      if (r.ok) refresh(); else alert(await r.text());
+    });
+
+    const clearBtn = div.querySelector('button[data-clear]');
+    if (clearBtn) clearBtn.addEventListener('click', async () => {
+      if (!confirm(`clear position for ${leaf.leaf}?`)) return;
+      const r = await fetch('/api/leaves/' + encodeURIComponent(leaf.leaf), { method: 'DELETE' });
+      if (r.ok) refresh();
+    });
+  });
+}
+
+async function refreshRoom() {
+  try {
+    const r = await fetch('/api/room').then(r => r.json());
+    if (r.width && r.depth && r.height) {
+      // Only rebuild if dimensions changed (avoid flicker)
+      const next = `${r.width}|${r.depth}|${r.height}`;
+      if (!roomDims || roomDims.key !== next) {
+        roomDims = { key: next, W: r.width, D: r.depth, H: r.height };
+        rebuildRoom(r.width, r.depth, r.height);
+      }
+    }
+    // Always sync the form fields if they're not focused
+    const wEl = document.getElementById('room-w');
+    const dEl = document.getElementById('room-d');
+    const hEl = document.getElementById('room-h');
+    const nEl = document.getElementById('room-notes');
+    if (document.activeElement !== wEl) wEl.value = r.width ?? '';
+    if (document.activeElement !== dEl) dEl.value = r.depth ?? '';
+    if (document.activeElement !== hEl) hEl.value = r.height ?? '';
+    if (document.activeElement !== nEl) nEl.value = r.notes ?? '';
+  } catch (e) { console.error(e); }
+}
+
+document.getElementById('room-save').addEventListener('click', async () => {
+  const w = parseFloat(document.getElementById('room-w').value);
+  const d = parseFloat(document.getElementById('room-d').value);
+  const h = parseFloat(document.getElementById('room-h').value);
+  const notes = document.getElementById('room-notes').value;
+  if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return alert('W/D/H must be positive numbers');
+  const r = await fetch('/api/room', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ width: w, depth: d, height: h, notes }),
+  });
+  if (r.ok) refreshRoom();
+  else alert(await r.text());
+});
+
+async function refresh() {
+  try {
+    const leaves = await fetch('/api/leaves').then(r => r.json());
+    renderLeaves(leaves);
+    renderSide(leaves);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+refresh();
+refreshRoom();
+setInterval(refresh, 5000);
+setInterval(refreshRoom, 8000);
+</script>
+</body>
+</html>
