@@ -67,11 +67,13 @@ last seen at 192.168.8.244).
   POSTs `/scan/reset` to all of them simultaneously → waits the duration
   (default 60 s) → pulls `/scan/result` from each into
   `~/repos/.scratch/ble-captures/<chipid>-<timestamp>.json` → `scp`'s
-  them and `scripts/analyze_ble_capture.py` to the Pi → runs the analyzer
-  on the first two captures. Output: per-leaf unique counts, intersection
-  size, RSSI-delta table for overlapping devices, log-distance estimates,
-  manufacturer breakdown, named advertisers. Distance is RELATIVE — see
-  the script's docstring for the path-loss model assumptions.
+  them + `scripts/analyze_ble_capture.py` to the Pi → runs the analyzer
+  on **all** captured leaves (N-input). Output: per-leaf stats, coverage
+  histogram (singletons → universal), RSSI matrix sorted by best signal,
+  biggest-spread devices (most spatially-informative — each has a clear
+  "closest" leaf with an estimated distance ratio that cancels out the
+  unknown TxPower), per-leaf singleton contributions, what each leaf
+  sees most clearly, manufacturer breakdown, named-advertiser RSSI vector.
 
 - **`bleraw <node>`** — Just dump `GET /scan/result` JSON from one leaf
   without resetting. Useful for inspecting a long-running scan window.
@@ -86,7 +88,7 @@ last seen at 192.168.8.244).
 | `scripts/gen-esp32-secrets.sh` | regenerates `src/secrets.h` from `~/repos/.scratch/mockingbird-wifi.txt` — never hand-edit secrets.h |
 | `scripts/bootstrap-pi-subnet-router.sh` | idempotent Pi setup (Tailscale install, Mockingbird WiFi connection, IP forwarding) |
 | `scripts/ble-experiment.sh` | runs the multi-leaf BLE capture pipeline (discover → reset → wait → pull → scp → analyze) |
-| `scripts/analyze_ble_capture.py` | pairwise comparison of two leaves' `/scan/result` JSONs — unique counts, RSSI deltas, log-distance estimates |
+| `scripts/analyze_ble_capture.py` | N-input multi-leaf analyzer — coverage histogram, RSSI matrix, biggest-spread (spatial-info) devices, per-leaf singletons, named-advertiser table with full RSSI vector |
 | `main/` | ESP-IDF firmware *for future ESP32-S3 hardware*. Doesn't run on the current WROOM-32 leaves — wrong chip family. |
 
 ## Credentials map (paths only, never values)

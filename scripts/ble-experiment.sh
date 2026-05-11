@@ -76,13 +76,12 @@ scp -q "${FILES[@]}" ~/repos/mockingbird/scripts/analyze_ble_capture.py \
     pi@mockingbird-pi:/tmp/
 
 if [ ${#FILES[@]} -ge 2 ]; then
-    A=$(basename "${FILES[0]}")
-    B=$(basename "${FILES[1]}")
-    ssh pi@mockingbird-pi "python3 /tmp/analyze_ble_capture.py /tmp/$A /tmp/$B"
-    if [ ${#FILES[@]} -gt 2 ]; then
-        echo
-        echo "(showing pair 1↔2; analyzer is currently 2-input — extend for N when you add a 3rd leaf)"
-    fi
+    # Pass all captures to the (N-input) analyzer.
+    REMOTE_PATHS=""
+    for f in "${FILES[@]}"; do
+        REMOTE_PATHS="$REMOTE_PATHS /tmp/$(basename "$f")"
+    done
+    ssh pi@mockingbird-pi "python3 /tmp/analyze_ble_capture.py$REMOTE_PATHS"
 else
-    echo "only one leaf reachable — skipping pairwise analysis, but the JSON is at $FILES"
+    echo "only one leaf reachable — skipping multi-leaf analysis, JSON saved at ${FILES[0]}"
 fi
