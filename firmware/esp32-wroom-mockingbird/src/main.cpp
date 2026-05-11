@@ -94,7 +94,13 @@ struct Msg {
     uint32_t t_ms;
 };
 
+// Build-time overridable for A/B testing different buffer depths against
+// the BLE+WiFi single-radio coex ceiling. Set via -DMSG_QUEUE_LEN=N in
+// platformio.ini or the CLI. 64 is the historic baseline (~3s of headroom
+// at 20 obs/s); larger absorbs longer TCP stalls without dropping BLE obs.
+#ifndef MSG_QUEUE_LEN
 #define MSG_QUEUE_LEN 64
+#endif
 
 static QueueHandle_t       g_q;
 static volatile uint32_t   g_n_sent    = 0;
