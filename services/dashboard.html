@@ -959,16 +959,24 @@ function fit() {
 addEventListener('resize', fit);
 fit();
 
-// ---- live track rendering ----
-// Server gives us tracks (persistent identities that survive MAC
-// rotation). Each track is a glowing sphere + a fading polyline trail
-// behind it. Positions interpolate smoothly toward server targets.
+// ---- live track + entity rendering ----
+// Two layers:
+//   1. tracks: one per persistent identity (survives MAC rotation)
+//   2. entities: clusters of co-located tracks (one physical person/
+//      object broadcasting multiple Continuity protocols)
+//
+// The track sphere stays small + per-track-colored. When ≥2 tracks
+// cluster as one entity, an ENTITY OVERLAY appears at the cluster
+// centroid — a larger translucent sphere ringed by the count of
+// member tracks, colored by entity_id.
 const deviceGroup = new THREE.Group();
+const entityGroup = new THREE.Group();
 const trailGroup = new THREE.Group();
 scene.add(deviceGroup);
+scene.add(entityGroup);
 scene.add(trailGroup);
-// keyed by track_id, not MAC, so rotation doesn't break identity
-const deviceByTrack = new Map();  // track_id → { sphere, target, labelEl, ... }
+const deviceByTrack = new Map();  // track_id → { sphere, ... }
+const entityByID = new Map();     // entity_id → { sphere, labelEl, count, ... }
 const LERP_RATE = 0.08;
 const STALE_AFTER_MS = 6000;  // start fading
 const REMOVE_AFTER_MS = 12000;
@@ -1061,23 +1069,24 @@ function ensureTrackEntry(track_id) {
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false })
   );
   sphere.add(halo);
-  // Uncertainty ellipsoid: 1σ confidence region from the MLE solver's
-  // 3×3 position covariance. A unit sphere whose scale/rotation we set
-  // each tick from the cov eigendecomposition. The ellipsoid sits at
-  // the same world position as the sphere, but is added at scene level
-  // (not as a child of sphere) because we need its own scale/rotation.
-  const ellipsoid = new THREE.Mesh(
-    new THREE.SphereGeometry(1.0, 24, 16),
-    new THREE.MeshBasicMaterial({
-      color, transparent: true, opacity: 0.10, wireframe: false, depthWrite: false,
-    })
+  // Uncertainty ellipsoid: wireframe only (no fill — fill engulfs the
+  // room when σ is ~1m). Geometry uses sparser segments so the wires
+  // are readable, not a dense mesh. We display at HALF the actual σ
+  // for visual clarity — covariance is still mathematically correct,
+  // just shown at 0.5σ so 1m-σ devices get a 50cm-radius ellipsoid.
+  const ellipsoid = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 12, 6)),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 })
   );
-  const ellipsoidEdge = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 16, 10)),
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 })
-  );
-  ellipsoid.add(ellipsoidEdge);
   deviceGroup.add(ellipsoid);
+  // Velocity vector — small arrow from sphere center along Kalman-
+  // estimated velocity. Hidden when velocity is near zero (stationary).
+  const velArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0),
+    0.001, color, 0.06, 0.04,
+  );
+  velArrow.visible = false;
+  deviceGroup.add(velArrow);
   const labelEl = document.createElement('div');
   labelEl.style.cssText = `
     color: #e6e9ef; font: 10px ui-monospace, "SF Mono", monospace;
@@ -1104,7 +1113,7 @@ function ensureTrackEntry(track_id) {
 
   entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0,
             rssi: -100, color, halo, trail, trailGeom,
-            ellipsoid, ellipsoidEdge };
+            ellipsoid, velArrow };
   deviceByTrack.set(track_id, entry);
   return entry;
 }
@@ -1151,31 +1160,57 @@ function eigh3x3(A) {
   };
 }
 
+// Display the ellipsoid at HALF the σ scale so it visually communicates
+// shape + relative confidence without engulfing the room. The math is
+// still 1σ; just the rendering shrinks for clarity.
+const ELLIPSOID_VIS_SCALE = 0.5;
+const ELLIPSOID_MIN = 0.12;
+const ELLIPSOID_MAX = 0.8;
+
 function updateEllipsoidFromCov(entry, cov, pos) {
-  // cov is 3×3 in ROOM coords: x = room.x, y = room.y, z = room.z.
-  // The 3D scene uses (room.x, room.z, room.y), i.e. swap rows/cols 2 and 3.
-  // The ellipsoid lives in three.js space, so permute.
+  // cov is 3×3 in ROOM coords (x=room.x, y=room.y, z=room.z).
+  // The 3D scene uses (room.x, room.z, room.y) → permute rows/cols 2↔3.
   const C = [
     [cov[0][0], cov[0][2], cov[0][1]],
     [cov[2][0], cov[2][2], cov[2][1]],
     [cov[1][0], cov[1][2], cov[1][1]],
   ];
   const e = eigh3x3(C);
-  // Each ellipsoid axis = sqrt(eigenvalue), pointing along eigenvector.
-  // Clamp σ to a sane visual range so a numerically-bad covariance
-  // doesn't make a hairy 50 m ellipsoid that hides everything.
-  const sx = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[0]))));
-  const sy = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[1]))));
-  const sz = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[2]))));
+  const sx = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[0]))));
+  const sy = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[1]))));
+  const sz = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[2]))));
   entry.ellipsoid.position.copy(pos);
   entry.ellipsoid.scale.set(sx, sy, sz);
-  // Build a rotation matrix from the eigenvectors
   const m = new THREE.Matrix4().makeBasis(
     new THREE.Vector3(e.vectors[0][0], e.vectors[1][0], e.vectors[2][0]),
     new THREE.Vector3(e.vectors[0][1], e.vectors[1][1], e.vectors[2][1]),
     new THREE.Vector3(e.vectors[0][2], e.vectors[1][2], e.vectors[2][2]),
   );
   entry.ellipsoid.quaternion.setFromRotationMatrix(m);
+}
+
+// Update the velocity arrow from the Kalman state's vx/vy/vz fields.
+// Renders only when the device has been moving (|v| > 0.05 m/s).
+function updateVelocityArrow(entry, vel_xyz, pos) {
+  if (!vel_xyz) {
+    entry.velArrow.visible = false;
+    return;
+  }
+  // Kalman state vel is in ROOM coords (vx, vy, vz). Three.js axes
+  // are (room.x, room.z, room.y), so reorder.
+  const vx = vel_xyz[0], vy = vel_xyz[2], vz = vel_xyz[1];
+  const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
+  if (speed < 0.05) {
+    entry.velArrow.visible = false;
+    return;
+  }
+  entry.velArrow.visible = true;
+  entry.velArrow.position.copy(pos);
+  // Arrow length scales with speed, capped so a fast-mover arrow doesn't
+  // span the room.
+  const arrowLen = Math.min(0.6, Math.max(0.12, speed));
+  entry.velArrow.setLength(arrowLen, 0.06, 0.04);
+  entry.velArrow.setDirection(new THREE.Vector3(vx, vy, vz).normalize());
 }
 
 function styleLabelForKey(labelEl, key) {
@@ -1236,8 +1271,72 @@ function pushTrailPoint(entry, d) {
   }
 }
 
+function ensureEntityOverlay(entity_id, color) {
+  let e = entityByID.get(entity_id);
+  if (e) return e;
+  // Bigger sphere than per-track (0.14 r), more emissive, semi-translucent
+  // so member tracks are still visible inside.
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.14, 24, 16),
+    new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.45,
+      transparent: true, opacity: 0.42, depthWrite: false,
+    })
+  );
+  // Halo ring (a flat torus rendered side-on) makes it visually distinct
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.22, 0.012, 8, 32),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.65, depthWrite: false })
+  );
+  ring.rotation.x = Math.PI / 2;
+  sphere.add(ring);
+  const labelEl = document.createElement('div');
+  labelEl.style.cssText = `
+    color: white; font: 600 11px -apple-system, "SF Pro Text", sans-serif;
+    background: rgba(20,22,26,0.92); padding: 3px 8px; border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.4); white-space: nowrap;
+    text-shadow: 0 0 4px rgba(0,0,0,0.8);
+  `;
+  const label = new CSS2DObject(labelEl);
+  label.position.set(0, 0.34, 0);
+  sphere.add(label);
+  entityGroup.add(sphere);
+  e = { sphere, ring, labelEl, color, lastSeen: 0, target: new THREE.Vector3() };
+  entityByID.set(entity_id, e);
+  return e;
+}
+
 function applyLiveDevices(devices) {
   const now = performance.now();
+  // First pass: group devices by entity_id (skip singletons)
+  const entityMembers = new Map();  // entity_id → [device, ...]
+  for (const d of devices) {
+    if (!d.entity_id || (d.entity_size || 1) < 2) continue;
+    if (!entityMembers.has(d.entity_id)) entityMembers.set(d.entity_id, []);
+    entityMembers.get(d.entity_id).push(d);
+  }
+  // Update / create entity overlays
+  for (const [eid, members] of entityMembers) {
+    // Weighted centroid: average member positions weighted by inverse σ
+    // (smaller σ = more weight). When no covariance available, equal weights.
+    let sx = 0, sy = 0, sz = 0, sw = 0;
+    for (const m of members) {
+      const cov = m.cov;
+      const sigma2 = cov ? Math.max(0.01, (cov[0][0] + cov[1][1] + cov[2][2]) / 3) : 1.0;
+      const w = 1.0 / sigma2;
+      sx += w * m.x; sy += w * m.y; sz += w * m.z; sw += w;
+    }
+    if (sw === 0) continue;
+    const fx = sx / sw, fy = sy / sw, fz = sz / sw;
+    // Pick the entity's display color from the longest-lived member's track_id
+    // (which is already what server uses for the entity_name hash, indirectly)
+    const overlay = ensureEntityOverlay(eid, trackColor(eid));
+    overlay.target.set(fx, fz, fy);  // room→three swap
+    overlay.lastSeen = now;
+    overlay.labelEl.textContent = `${members[0].entity_name || eid.slice(0,6)} · ${members.length} tracks`;
+    overlay.labelEl.style.display = showAllLabels ? '' : 'none';
+  }
+  // Now individual tracks
   for (const d of devices) {
     const entry = ensureTrackEntry(d.track_id);
     entry.target.set(d.x, d.z, d.y);
@@ -1250,15 +1349,15 @@ function applyLiveDevices(devices) {
     styleLabelForKey(entry.labelEl, d.track_id);
     pushTrailPoint(entry, d);
     updateTrailGeometry(entry, entry.clientTrail, entry.color);
-    // Uncertainty ellipsoid — visible only when we have a real covariance
-    // (i.e., MLE multilat ran) AND the user wants to see it. For centroid-
-    // fallback devices, hide it.
+    // Uncertainty ellipsoid (1σ, drawn at 0.5× scale for visual clarity)
     if (d.cov && d.pos_method && d.pos_method.startsWith('mle') && showEllipsoids) {
       entry.ellipsoid.visible = true;
       updateEllipsoidFromCov(entry, d.cov, entry.target);
     } else {
       entry.ellipsoid.visible = false;
     }
+    // Velocity arrow from Kalman state
+    updateVelocityArrow(entry, d.velocity, entry.target);
   }
 }
 
@@ -1280,6 +1379,23 @@ function refreshDeviceLabels() {
 
 function tickDeviceAnimation() {
   const now = performance.now();
+  // Animate entity overlays (slow lerp like tracks, fade after STALE)
+  for (const [eid, eOv] of entityByID) {
+    eOv.sphere.position.lerp(eOv.target, LERP_RATE);
+    // Slow rotation of the halo ring for visual appeal
+    eOv.ring.rotation.z += 0.012;
+    const age = now - eOv.lastSeen;
+    if (age > REMOVE_AFTER_MS) {
+      entityGroup.remove(eOv.sphere);
+      entityByID.delete(eid);
+      continue;
+    }
+    const fadeMul = age > STALE_AFTER_MS ?
+      Math.max(0, 1 - (age - STALE_AFTER_MS) / (REMOVE_AFTER_MS - STALE_AFTER_MS)) : 1;
+    eOv.sphere.material.opacity = 0.42 * fadeMul;
+    eOv.ring.material.opacity   = 0.65 * fadeMul;
+    eOv.labelEl.style.opacity   = fadeMul;
+  }
   for (const [tid, e] of deviceByTrack) {
     e.sphere.position.lerp(e.target, LERP_RATE);
     // Ellipsoid follows the (smoothly-lerped) sphere position so it never
@@ -1290,6 +1406,7 @@ function tickDeviceAnimation() {
     if (age > REMOVE_AFTER_MS) {
       deviceGroup.remove(e.sphere);
       if (e.ellipsoid) deviceGroup.remove(e.ellipsoid);
+      if (e.velArrow)  deviceGroup.remove(e.velArrow);
       trailGroup.remove(e.trail);
       e.trailGeom.dispose();
       deviceByTrack.delete(tid);
@@ -1301,19 +1418,13 @@ function tickDeviceAnimation() {
       e.halo.material.opacity = fade * 0.18;
       e.labelEl.style.opacity = fade;
       e.trail.material.opacity = fade * 0.9;
-      if (e.ellipsoid && e.ellipsoid.visible) {
-        e.ellipsoid.material.opacity = fade * 0.10;
-        e.ellipsoidEdge.material.opacity = fade * 0.35;
-      }
+      if (e.ellipsoid && e.ellipsoid.visible) e.ellipsoid.material.opacity = fade * 0.45;
     } else {
       e.sphere.material.opacity = 1;
       e.halo.material.opacity = 0.18;
       e.labelEl.style.opacity = 1;
       e.trail.material.opacity = 0.9;
-      if (e.ellipsoid && e.ellipsoid.visible) {
-        e.ellipsoid.material.opacity = 0.10;
-        e.ellipsoidEdge.material.opacity = 0.35;
-      }
+      if (e.ellipsoid && e.ellipsoid.visible) e.ellipsoid.material.opacity = 0.45;
     }
   }
 }

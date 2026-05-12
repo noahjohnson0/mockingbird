@@ -582,6 +582,11 @@ class TrackStore:
                     # Position uncertainty for the 3D ellipsoid renderer
                     "cov": track.last_cov_3x3,
                     "rmse_m": track.last_rmse_m,
+                    # Velocity from Kalman state, for arrow rendering
+                    "velocity": (
+                        [track.kf_state[3], track.kf_state[4], track.kf_state[5]]
+                        if track.kf_state is not None else None
+                    ),
                 }
                 out.append(enriched)
             # ---- entity clustering pass ----
