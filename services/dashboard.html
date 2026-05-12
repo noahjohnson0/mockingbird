@@ -518,7 +518,12 @@
     <button id="opt-clear-names" title="Drop all manual overrides so devices revert to their auto-assigned names">reset names</button>
   </div>
 
-  <h2>devices</h2>
+  <h2>entities <span style="font-size:10px; color:#6b7280; text-transform:none; letter-spacing:0; font-weight:400">— clusters of co-located devices, tightest σ</span></h2>
+  <div id="live-entity-list">
+    <div class="empty" style="font-size:11px">no multi-track entities yet</div>
+  </div>
+
+  <h2 style="margin-top: 14px">devices</h2>
   <div id="live-list">
     <div class="empty">switch to Live to start polling…</div>
   </div>
@@ -1018,6 +1023,22 @@ function autoName(mac) {
   const b = BIRDS[Math.abs(hashStr(mac + ':bird')) % BIRDS.length];
   return `${a} ${b}`;
 }
+const ENTITY_NAMES_KEY = 'mockingbird.entityNames';
+let entityNames = {};
+try { entityNames = JSON.parse(localStorage.getItem(ENTITY_NAMES_KEY) || '{}'); }
+catch { entityNames = {}; }
+
+function getEntityName(eid, fallback) {
+  return entityNames[eid] || fallback || eid.slice(0, 8);
+}
+function setEntityName(eid, name) {
+  name = (name || '').trim().slice(0, 24);
+  if (name) entityNames[eid] = name;
+  else delete entityNames[eid];
+  localStorage.setItem(ENTITY_NAMES_KEY, JSON.stringify(entityNames));
+}
+function isEntityNamed(eid) { return !!entityNames[eid]; }
+
 const NAMES_KEY = 'mockingbird.deviceNames';
 const SHOW_ALL_KEY = 'mockingbird.showAllLabels';
 let macNames = {};  // user overrides only
@@ -1200,7 +1221,10 @@ function updateVelocityArrow(entry, vel_xyz, pos) {
   // are (room.x, room.z, room.y), so reorder.
   const vx = vel_xyz[0], vy = vel_xyz[2], vz = vel_xyz[1];
   const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
-  if (speed < 0.05) {
+  // Threshold raised from 5 cm/s to 20 cm/s — anything below that is
+  // almost certainly Kalman drift from RSSI jitter, not real motion.
+  // 20 cm/s is roughly "slow walking pace" minimum.
+  if (speed < 0.20) {
     entry.velArrow.visible = false;
     return;
   }
@@ -1333,9 +1357,10 @@ function applyLiveDevices(devices, entities) {
     const sigma = cov
       ? Math.sqrt(Math.max(0, (cov[0][0] + cov[1][1] + cov[2][2]) / 3))
       : null;
+    const displayName = getEntityName(e.entity_id, e.entity_name);
     overlay.labelEl.textContent =
-      `${e.entity_name} · ${e.n_tracks} tracks` +
-      (sigma != null ? ` · σ=${sigma.toFixed(2)}m` : '');
+      `${displayName} · ${e.n_tracks} tracks` +
+      (sigma != null ? ` · σ=${(sigma*100).toFixed(0)}cm` : '');
     overlay.labelEl.style.display = showAllLabels ? '' : 'none';
   }
   // Individual tracks (always rendered)
@@ -1813,6 +1838,50 @@ const liveListEl = document.getElementById('live-list');
 
 let _liveFirstPollDone = false;
 const liveRowByTrack = new Map();  // track_id → row <div> in the sidebar
+const liveEntityRowByID = new Map();  // entity_id → row <div>
+
+function ensureEntityRow(e) {
+  let row = liveEntityRowByID.get(e.entity_id);
+  if (!row) {
+    const col = '#' + trackColor(e.entity_id).getHexString();
+    const name = getEntityName(e.entity_id, e.entity_name);
+    row = document.createElement('div');
+    row.className = 'dev-row fadein' + (isEntityNamed(e.entity_id) ? ' named' : '');
+    row.dataset.entity = e.entity_id;
+    row.title = `entity ${e.entity_id}\n${e.n_tracks} tracks, ${e.n_tracks_used} fused`;
+    row.innerHTML = `
+      <span class="dev-dot" style="background:${col}; width:10px; height:10px"></span>
+      <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
+      <span class="dev-rssi"></span>
+      <span class="dev-n"></span>
+    `;
+    const inp = row.querySelector('input.dev-name');
+    inp.addEventListener('click', ev => ev.stopPropagation());
+    const save = debounce(() => {
+      const v = inp.value.trim();
+      setEntityName(e.entity_id, v);
+      row.classList.toggle('named', isEntityNamed(e.entity_id));
+      if (!v) inp.value = getEntityName(e.entity_id, e.entity_name);
+      // Refresh 3D label immediately for this entity
+      const overlay = entityByID.get(e.entity_id);
+      if (overlay) {
+        overlay.labelEl.textContent = getEntityName(e.entity_id, e.entity_name) +
+          ` · ${overlay.lastEntity ? overlay.lastEntity.n_tracks : '?'} tracks`;
+      }
+      toast(`entity named "${v || '(reset)'}"`, 'ok');
+    }, 350);
+    inp.addEventListener('input', save);
+    inp.addEventListener('blur', save);
+    document.getElementById('live-entity-list').appendChild(row);
+    liveEntityRowByID.set(e.entity_id, row);
+  }
+  // Refresh per-tick text bits (NEVER touch the input)
+  const cov = e.cov || [[0,0,0]]*3;
+  const sigma = Math.sqrt(Math.max(0, (cov[0][0] + cov[1][1] + cov[2][2]) / 3));
+  row.querySelector('.dev-rssi').textContent = `σ=${(sigma*100).toFixed(0)}cm`;
+  row.querySelector('.dev-n').textContent = `${e.n_tracks}T`;
+  return row;
+}
 
 function ensureLiveRow(d) {
   let row = liveRowByTrack.get(d.track_id);
@@ -1858,6 +1927,24 @@ async function pollLive() {
   try {
     const r = await fetch('/api/live').then(r => r.json());
     applyLiveDevices(r.devices || [], r.entities || []);
+    // Render entity rows in sidebar (above the per-track list)
+    const entityListEl = document.getElementById('live-entity-list');
+    const seenEnt = new Set();
+    for (const e of (r.entities || [])) {
+      ensureEntityRow(e);
+      seenEnt.add(e.entity_id);
+    }
+    // Drop rows for entities that vanished
+    for (const [eid, row] of liveEntityRowByID) {
+      if (!seenEnt.has(eid)) { row.remove(); liveEntityRowByID.delete(eid); }
+    }
+    if (liveEntityRowByID.size === 0) {
+      if (!entityListEl.querySelector('.empty')) {
+        entityListEl.innerHTML = '<div class="empty" style="font-size:11px">no multi-track entities yet (need ≥2 tracks with similar RSSI fingerprints)</div>';
+      }
+    } else {
+      entityListEl.querySelector('.empty')?.remove();
+    }
     const devs = r.devices || [];
     liveCountEl.textContent = devs.length;
     const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
