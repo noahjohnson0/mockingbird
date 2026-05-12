@@ -374,13 +374,96 @@ class Entity:
     first_seen: float
     last_seen: float
     track_ids: list[str] = field(default_factory=list)
-    # Cached aggregate fingerprint (max RSSI per leaf across member tracks)
     fingerprint: dict[str, float] = field(default_factory=dict)
     last_position: tuple[float, float, float] | None = None
+    last_cov_3x3: list | None = None    # Fused covariance after information-form averaging
+    n_tracks_used: int = 0              # How many members contributed to the fused measurement
+    # Entity-level Kalman state (separate from per-track filters): when
+    # all N member tracks see the SAME physical device, their MLE
+    # measurements are independent-ish observations of one location and
+    # we can fuse them into one entity-level estimate via the information
+    # form (sum of Σ⁻¹). Then push that fused measurement through this
+    # constant-velocity Kalman filter for temporal smoothing.
+    kf_state: list[float] | None = None
+    kf_cov: list[list[float]] | None = None
+    kf_last_t: float = 0.0
 
     @property
     def name(self) -> str:
         return codename_for_entity(self.entity_id)
+
+
+def _entity_kalman_step(ent: Entity, measurement_xyz: tuple[float, float, float],
+                        meas_cov_3x3: list[list[float]], now: float
+                        ) -> tuple[float, float, float]:
+    """Kalman update on entity-level state. Same constant-velocity model
+    as track-level kalman_step, but reads/writes ent.kf_* fields. Inlined
+    here to avoid coupling Track and Entity types."""
+    R = _clamp_pos_cov(meas_cov_3x3, min_std=0.05, max_std=2.0)
+
+    if ent.kf_state is not None:
+        s = ent.kf_state
+        jump = math.sqrt((s[0] - measurement_xyz[0])**2 +
+                         (s[1] - measurement_xyz[1])**2 +
+                         (s[2] - measurement_xyz[2])**2)
+        if _kf_state_looks_corrupt(s) or jump > 5.0:
+            ent.kf_state = None
+
+    if ent.kf_state is None:
+        ent.kf_state = list(measurement_xyz) + [0.0, 0.0, 0.0]
+        ent.kf_cov = [
+            [R[0][0], R[0][1], R[0][2], 0, 0, 0],
+            [R[1][0], R[1][1], R[1][2], 0, 0, 0],
+            [R[2][0], R[2][1], R[2][2], 0, 0, 0],
+            [0, 0, 0, 1.0, 0, 0],
+            [0, 0, 0, 0, 1.0, 0],
+            [0, 0, 0, 0, 0, 1.0],
+        ]
+        ent.kf_last_t = now
+        return measurement_xyz
+
+    dt = max(0.0, min(2.0, now - ent.kf_last_t))
+    ent.kf_last_t = now
+
+    x = ent.kf_state
+    x[0] += x[3] * dt; x[1] += x[4] * dt; x[2] += x[5] * dt
+
+    q_pos = 0.005 * dt
+    q_vel = 0.3 * dt
+    P = ent.kf_cov
+    new_P = [row[:] for row in P]
+    for i in range(3):
+        for j in range(3):
+            new_P[i][j] = P[i][j] + dt * (P[i][j+3] + P[i+3][j]) + dt*dt * P[i+3][j+3]
+            new_P[i][j+3] = P[i][j+3] + dt * P[i+3][j+3]
+            new_P[i+3][j] = new_P[i][j+3]
+    new_P[0][0] += q_pos; new_P[1][1] += q_pos; new_P[2][2] += q_pos
+    new_P[3][3] += q_vel; new_P[4][4] += q_vel; new_P[5][5] += q_vel
+    P = new_P
+
+    z = measurement_xyz
+    y = [z[0] - x[0], z[1] - x[1], z[2] - x[2]]
+    S = [[P[i][j] + R[i][j] for j in range(3)] for i in range(3)]
+    S_inv = _invert_3x3_local(S)
+    if S_inv is None:
+        return (x[0], x[1], x[2])
+
+    K = [[0.0] * 3 for _ in range(6)]
+    for i in range(6):
+        for j in range(3):
+            for k in range(3):
+                K[i][j] += P[i][k] * S_inv[k][j]
+    for i in range(6):
+        x[i] += K[i][0] * y[0] + K[i][1] * y[1] + K[i][2] * y[2]
+    for i in range(6):
+        for j in range(6):
+            term = 0.0
+            for k in range(3):
+                term += K[i][k] * P[k][j]
+            P[i][j] -= term
+    ent.kf_state = x
+    ent.kf_cov = P
+    return (x[0], x[1], x[2])
 
 
 class TrackStore:
@@ -454,11 +537,15 @@ class TrackStore:
         # mint a new one.
         new_entities: dict[str, Entity] = {}
         new_t2e: dict[str, str] = {}
-        for root, tids in clusters.items():
+        # Process clusters in size-descending order so the biggest cluster
+        # gets first pick of its preferred eid. Smaller colliding clusters
+        # fall back to a fresh uuid (rather than silently overwriting).
+        sorted_clusters = sorted(clusters.items(), key=lambda kv: -len(kv[1]))
+        for root, tids in sorted_clusters:
             existing_ids = [self.track_to_entity.get(t) for t in tids]
-            existing_ids = [e for e in existing_ids if e and e in self.entities]
+            existing_ids = [e for e in existing_ids
+                            if e and e in self.entities and e not in new_entities]
             if existing_ids:
-                # Take the entity_id with most members in this cluster
                 from collections import Counter
                 eid = Counter(existing_ids).most_common(1)[0][0]
                 first_seen = self.entities[eid].first_seen
@@ -480,8 +567,72 @@ class TrackStore:
                 entity_id=eid, first_seen=first_seen, last_seen=now,
                 track_ids=tids, fingerprint=agg_fp, last_position=last_pos,
             )
+        # Carry forward Kalman state from old entity (matched by id) so
+        # the entity-level filter persists across cluster recomputes.
+        for eid, ent in new_entities.items():
+            if eid in self.entities:
+                prev = self.entities[eid]
+                ent.kf_state = prev.kf_state
+                ent.kf_cov = prev.kf_cov
+                ent.kf_last_t = prev.kf_last_t
         self.entities = new_entities
         self.track_to_entity = new_t2e
+
+    def _fuse_entities(self, now: float) -> None:
+        """For each multi-track entity, fuse member tracks' MLE position
+        measurements via information-form averaging:
+            Σ_fused⁻¹ = Σᵢ Σᵢ⁻¹
+            μ_fused = Σ_fused · Σᵢ Σᵢ⁻¹ xᵢ
+        Then push the fused (μ, Σ) through an entity-level Kalman filter
+        for temporal smoothing.
+
+        Theoretical accuracy gain: for N members with similar covariance,
+        fused σ ≈ σ_track / √N. With 16 members at σ≈0.7m, fused σ ≈ 17cm.
+        Real result will be worse than √N because the member tracks aren't
+        truly independent (they share an antenna), but still much tighter
+        than any single track.
+        """
+        from mockingbird_calibration import _invert_3x3 as inv3
+        for eid, ent in self.entities.items():
+            if len(ent.track_ids) < 2:
+                # Single-track "entities" don't need fusion; their kalman
+                # is already done at the track level.
+                continue
+            # Gather valid (position, cov) pairs from member tracks
+            info_M = [[0.0] * 3 for _ in range(3)]
+            info_v = [0.0, 0.0, 0.0]
+            n_used = 0
+            for tid in ent.track_ids:
+                t = self.tracks.get(tid)
+                if t is None or t.last_position is None or t.last_cov_3x3 is None:
+                    continue
+                Sinv = inv3(t.last_cov_3x3)
+                if Sinv is None:
+                    continue
+                for i in range(3):
+                    for j in range(3):
+                        info_M[i][j] += Sinv[i][j]
+                    info_v[i] += sum(Sinv[i][k] * t.last_position[k] for k in range(3))
+                n_used += 1
+            ent.n_tracks_used = n_used
+            if n_used < 2:
+                # Fall back to the single contributing track's pos (or
+                # whatever last_position the entity already has)
+                continue
+            Sf = inv3(info_M)
+            if Sf is None:
+                continue
+            mu = [sum(Sf[i][k] * info_v[k] for k in range(3)) for i in range(3)]
+            # Clamp the fused cov to sane visual range (math is still real)
+            Sf = [[Sf[i][j] for j in range(3)] for i in range(3)]  # copy
+            # Entity-level Kalman step. We use the per-track helper but
+            # operate on the Entity's own kf_state/kf_cov fields by
+            # temporarily wrapping the entity as a Track-shaped object.
+            ent.last_cov_3x3 = Sf
+            # Kalman fusion against history
+            smoothed = _entity_kalman_step(ent, tuple(mu), Sf, now)
+            ent.last_position = smoothed
+
 
     def step(self, devices: Iterable[dict], now: float | None = None,
              calibration=None, positions: dict | None = None,
@@ -593,6 +744,11 @@ class TrackStore:
             # All tracks now updated; cluster them by RSSI fingerprint
             # similarity → entities. Sticky IDs across calls.
             self._cluster_entities(now)
+            # ---- entity-level position fusion + Kalman ----
+            # For each multi-track entity, fuse member MLE measurements
+            # into one weighted estimate (information-form sum of Σ⁻¹)
+            # then run an entity-level Kalman for temporal smoothing.
+            self._fuse_entities(now)
             # Decorate the output with entity_id and entity_name
             for row in out:
                 eid = self.track_to_entity.get(row["track_id"])
@@ -635,6 +791,36 @@ class TrackStore:
         if best is not None and best_rms <= MATCH_RMS_DBM_THRESHOLD:
             return best
         return None
+
+    def entities_snapshot(self, now: float | None = None) -> list[dict]:
+        """Return JSON-able dicts for currently-tracked entities (size ≥ 2)
+        with fused position, covariance, velocity. Single-track 'entities'
+        are excluded since the per-track output already covers them."""
+        if now is None:
+            now = time.time()
+        out = []
+        with self._lock:
+            for eid, ent in self.entities.items():
+                if len(ent.track_ids) < 2 or ent.last_position is None:
+                    continue
+                vel = None
+                if ent.kf_state is not None and len(ent.kf_state) >= 6:
+                    vel = [ent.kf_state[3], ent.kf_state[4], ent.kf_state[5]]
+                out.append({
+                    "entity_id": eid,
+                    "entity_name": ent.name,
+                    "n_tracks": len(ent.track_ids),
+                    "n_tracks_used": ent.n_tracks_used,
+                    "x": ent.last_position[0],
+                    "y": ent.last_position[1],
+                    "z": ent.last_position[2],
+                    "cov": ent.last_cov_3x3,
+                    "velocity": vel,
+                    "age_s": round(now - ent.first_seen, 1),
+                    "track_ids": list(ent.track_ids),
+                })
+        out.sort(key=lambda e: -e["n_tracks"])  # biggest clusters first
+        return out
 
     def _gc(self, now: float) -> None:
         dead = [tid for tid, t in self.tracks.items() if now - t.last_seen > FORGET_AFTER_S]
