@@ -345,6 +345,17 @@
     </div>
   </div>
   <div id="view-cube" title="Click a face to snap that view. Drag to orbit."></div>
+  <div id="focus-badge" style="
+    position: absolute; bottom: 14px; left: 14px;
+    background: rgba(20,22,26,0.92); padding: 8px 12px;
+    border-radius: 6px; border: 1px solid #2a2e36;
+    font-size: 11px; color: #cdd1d7; z-index: 4;
+    display: none; max-width: 280px;
+  ">
+    <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em">focused</div>
+    <div id="focus-name" style="font-weight: 600; margin-top: 2px">—</div>
+    <div id="focus-meta" style="font-size: 10px; color: #6b7280; margin-top: 2px">click empty space to clear</div>
+  </div>
 </div>
 <div id="side">
   <div class="tabs">
@@ -977,11 +988,19 @@ fit();
 const deviceGroup = new THREE.Group();
 const entityGroup = new THREE.Group();
 const trailGroup = new THREE.Group();
+const predictionGroup = new THREE.Group();
+const heatmapGroup = new THREE.Group();
 scene.add(deviceGroup);
 scene.add(entityGroup);
 scene.add(trailGroup);
-const deviceByTrack = new Map();  // track_id → { sphere, ... }
-const entityByID = new Map();     // entity_id → { sphere, labelEl, count, ... }
+scene.add(predictionGroup);
+scene.add(heatmapGroup);
+const deviceByTrack = new Map();
+const entityByID = new Map();
+// What the user has clicked on (track_id or entity_id). The selected
+// thing gets extra visual treatment + heatmap overlay.
+let focusedKey = null;       // string key (track_id or entity_id)
+let focusedKind = null;      // 'track' or 'entity'
 const LERP_RATE = 0.08;
 const STALE_AFTER_MS = 6000;  // start fading
 const REMOVE_AFTER_MS = 12000;
@@ -1333,13 +1352,49 @@ function ensureEntityOverlay(entity_id, color) {
     0.001, 0xffffff, 0.08, 0.05,
   );
   velArrow.visible = false;
+  // Prediction line: dashed segment extrapolating velocity 3 s ahead.
+  // Uses LineDashedMaterial which requires .computeLineDistances() after
+  // geometry update; we use a simple two-point line for now and dash via
+  // alternating opacity by drawing many short segments.
+  const predGeom = new THREE.BufferGeometry();
+  predGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  const predLine = new THREE.LineSegments(
+    predGeom,
+    new THREE.LineDashedMaterial({
+      color, transparent: true, opacity: 0.55,
+      dashSize: 0.08, gapSize: 0.05,
+    }),
+  );
+  predLine.visible = false;
+  predictionGroup.add(predLine);
   entityGroup.add(sphere);
   entityGroup.add(ellipsoid);
   entityGroup.add(velArrow);
-  e = { sphere, ring, ellipsoid, velArrow, labelEl, color,
+  e = { sphere, ring, ellipsoid, velArrow, predLine, labelEl, color,
         lastSeen: 0, target: new THREE.Vector3() };
   entityByID.set(entity_id, e);
   return e;
+}
+
+// Update the dashed prediction line for an entity based on its current
+// Kalman velocity. Extrapolates PREDICTION_HORIZON_S seconds ahead and
+// draws a dashed segment from the current position out to that future
+// point. Hidden if velocity is below the real-motion threshold.
+const PREDICTION_HORIZON_S = 3.0;
+function updatePredictionLine(eOv, vel_xyz, pos) {
+  if (!vel_xyz) { eOv.predLine.visible = false; return; }
+  const vx = vel_xyz[0], vy = vel_xyz[2], vz = vel_xyz[1];  // room→three swap
+  const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
+  if (speed < 0.20) { eOv.predLine.visible = false; return; }
+  eOv.predLine.visible = true;
+  // Build dashed segment from (pos) → (pos + v * PREDICTION_HORIZON_S)
+  const ex = pos.x + vx * PREDICTION_HORIZON_S;
+  const ey = pos.y + vy * PREDICTION_HORIZON_S;
+  const ez = pos.z + vz * PREDICTION_HORIZON_S;
+  eOv.predLine.geometry.setAttribute('position', new THREE.BufferAttribute(
+    new Float32Array([pos.x, pos.y, pos.z, ex, ey, ez]), 3));
+  eOv.predLine.geometry.attributes.position.needsUpdate = true;
+  eOv.predLine.computeLineDistances();
 }
 
 function applyLiveDevices(devices, entities) {
@@ -1415,6 +1470,7 @@ function tickDeviceAnimation() {
       entityGroup.remove(eOv.sphere);
       entityGroup.remove(eOv.ellipsoid);
       entityGroup.remove(eOv.velArrow);
+      predictionGroup.remove(eOv.predLine);
       entityByID.delete(eid);
       continue;
     }
@@ -1433,8 +1489,10 @@ function tickDeviceAnimation() {
     }
     if (eOv.lastEntity && eOv.lastEntity.velocity) {
       updateVelocityArrow(eOv, eOv.lastEntity.velocity, eOv.sphere.position);
+      updatePredictionLine(eOv, eOv.lastEntity.velocity, eOv.sphere.position);
     } else {
       eOv.velArrow.visible = false;
+      eOv.predLine.visible = false;
     }
   }
   for (const [tid, e] of deviceByTrack) {
@@ -1481,6 +1539,223 @@ const COLORS = [0x60a5fa, 0xa78bfa, 0xf472b6, 0x34d399, 0xfb923c, 0x22d3ee, 0xfb
 const leafGroup = new THREE.Group();
 scene.add(leafGroup);
 const leavesByName = new Map();
+
+// Raycaster for click-to-select in the 3D scene.
+const _raycaster = new THREE.Raycaster();
+const _mouseNDC = new THREE.Vector2();
+sceneEl.addEventListener('click', (ev) => {
+  // Convert mouse position to normalized device coords (-1 to +1)
+  const rect = renderer.domElement.getBoundingClientRect();
+  _mouseNDC.x =  ((ev.clientX - rect.left) / rect.width)  * 2 - 1;
+  _mouseNDC.y = -((ev.clientY - rect.top)  / rect.height) * 2 + 1;
+  _raycaster.setFromCamera(_mouseNDC, camera);
+  // Try entities first (bigger spheres, more likely intended target)
+  const entSpheres = [...entityByID.values()].map(e => e.sphere);
+  let hits = _raycaster.intersectObjects(entSpheres, false);
+  if (hits.length) {
+    const sphere = hits[0].object;
+    for (const [eid, e] of entityByID) {
+      if (e.sphere === sphere) {
+        setFocused(eid, 'entity');
+        return;
+      }
+    }
+  }
+  // Then per-track spheres
+  const trackSpheres = [...deviceByTrack.values()].map(e => e.sphere);
+  hits = _raycaster.intersectObjects(trackSpheres, false);
+  if (hits.length) {
+    const sphere = hits[0].object;
+    for (const [tid, e] of deviceByTrack) {
+      if (e.sphere === sphere) {
+        setFocused(tid, 'track');
+        return;
+      }
+    }
+  }
+  // Click on empty space → clear selection
+  setFocused(null, null);
+});
+
+function setFocused(key, kind) {
+  focusedKey = key;
+  focusedKind = kind;
+  const badge = document.getElementById('focus-badge');
+  if (key) {
+    rebuildHeatmap();
+    badge.style.display = 'block';
+    let name = '—', meta = '';
+    if (kind === 'entity') {
+      const e = entityByID.get(key);
+      if (e && e.lastEntity) {
+        name = getEntityName(key, e.lastEntity.entity_name);
+        const c = e.lastEntity.cov;
+        const σ = c ? Math.sqrt(Math.max(0, (c[0][0] + c[1][1] + c[2][2]) / 3)) : 0;
+        meta = `entity · ${e.lastEntity.n_tracks} tracks · σ=${(σ*100).toFixed(0)}cm`;
+      }
+    } else if (kind === 'track') {
+      const t = deviceByTrack.get(key);
+      if (t && t.lastDevice) {
+        name = t.lastDevice.track_name;
+        meta = `track · rssi ${t.lastDevice.rssi_max} dBm · ${t.lastDevice.n_leaves}L`;
+      }
+    }
+    document.getElementById('focus-name').textContent = name;
+    document.getElementById('focus-meta').textContent = meta + ' · click empty to clear';
+  } else {
+    heatmapMesh.visible = false;
+    badge.style.display = 'none';
+  }
+  // Highlight the selected sphere with a bigger glow ring
+  for (const [tid, e] of deviceByTrack) {
+    e.halo.material.opacity = (kind === 'track' && tid === key) ? 0.55 : 0.18;
+  }
+  for (const [eid, e] of entityByID) {
+    e.ring.material.opacity = (kind === 'entity' && eid === key) ? 1.0 : 0.65;
+  }
+  // Toast so the user knows it's selected
+  if (key) {
+    let label = '';
+    if (kind === 'entity') {
+      const e = entityByID.get(key);
+      label = e && e.lastEntity ? (getEntityName(key, e.lastEntity.entity_name)) : key.slice(0,8);
+    } else {
+      const t = deviceByTrack.get(key);
+      label = t && t.lastDevice ? t.lastDevice.track_name : key.slice(0,8);
+    }
+    toast(`focused on ${label} — likelihood heatmap shown on floor`, 'ok', 4000);
+  }
+}
+
+// Floor heatmap. For the focused device/entity, sample a grid of (x,y)
+// points across the floor plane and compute the log-likelihood that the
+// device is at that point given its observed per-leaf RSSI vector and
+// the path-loss model. Visualizes the math: a bright spot exactly where
+// the system thinks the device is, fading out as you move away.
+const HEATMAP_RES = 40;       // 40×40 grid cells → 1600 samples
+let heatmapMesh = null;
+let _lastCalibration = null;
+let _leafPosCache = null;
+let _roomDimsCache = null;
+
+(function initHeatmap() {
+  const geom = new THREE.PlaneGeometry(1, 1, HEATMAP_RES - 1, HEATMAP_RES - 1);
+  const colors = new Float32Array(HEATMAP_RES * HEATMAP_RES * 3);
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  heatmapMesh = new THREE.Mesh(geom, mat);
+  heatmapMesh.rotation.x = -Math.PI / 2;     // lay flat
+  heatmapMesh.position.y = 0.01;             // just above the floor
+  heatmapMesh.visible = false;
+  heatmapGroup.add(heatmapMesh);
+})();
+
+let _heatmapCacheAgeTicks = 0;
+async function rebuildHeatmap() {
+  if (!focusedKey) { heatmapMesh.visible = false; return; }
+  // Refresh cached cal + leaves every ~30 polls (= 15 s) so changes
+  // propagate without re-fetching on every tick.
+  if (++_heatmapCacheAgeTicks > 30) {
+    _lastCalibration = null;
+    _leafPosCache = null;
+    _heatmapCacheAgeTicks = 0;
+  }
+  const [cal, leaves] = await Promise.all([
+    _lastCalibration || fetch('/api/calibration').then(r => r.json()),
+    _leafPosCache    || fetch('/api/leaves').then(r => r.json()),
+  ]);
+  _lastCalibration = cal;
+  _leafPosCache = leaves;
+  if (!cal || !cal.calibrated || !cal.per_leaf) { heatmapMesh.visible = false; return; }
+  const W = roomDims ? roomDims.W : 4;
+  const D = roomDims ? roomDims.D : 4;
+  // Find the focused thing's RSSI vector
+  let rssiVec = null;
+  if (focusedKind === 'entity') {
+    // Aggregate member tracks' per-leaf RSSI from devices array of last poll
+    const e = entityByID.get(focusedKey);
+    if (!e) return;
+    // Reconstruct: any member track has a leaves: [{leaf, rssi}] array.
+    // Take the max RSSI per leaf across members.
+    rssiVec = {};
+    for (const [tid, te] of deviceByTrack) {
+      if (te.lastDevice && te.lastDevice.entity_id === focusedKey) {
+        for (const x of (te.lastDevice.leaves || [])) {
+          if (rssiVec[x.leaf] == null || x.rssi > rssiVec[x.leaf]) {
+            rssiVec[x.leaf] = x.rssi;
+          }
+        }
+      }
+    }
+  } else if (focusedKind === 'track') {
+    const t = deviceByTrack.get(focusedKey);
+    if (!t || !t.lastDevice) return;
+    rssiVec = {};
+    for (const x of (t.lastDevice.leaves || [])) rssiVec[x.leaf] = x.rssi;
+  }
+  if (!rssiVec || Object.keys(rssiVec).length < 2) {
+    heatmapMesh.visible = false;
+    return;
+  }
+  // Build a lookup: leaf -> position + cal
+  const leafInfo = {};
+  for (const L of leaves) {
+    if (L.x == null) continue;
+    const pl = cal.per_leaf[L.leaf];
+    if (!pl) continue;
+    leafInfo[L.leaf] = {
+      x: L.x, y: L.y, z: L.z,
+      p0: pl.p0, n: pl.n, sigma: pl.sigma_dbm,
+    };
+  }
+  // Grid evaluation: for each (gx, gy) sample at room midheight z,
+  // compute sum over leaves of [(rssi_observed - rssi_predicted)/σ]²
+  // → that's the negative log-likelihood (lower = better fit).
+  const zSample = (roomDims ? roomDims.H : 2.4) / 2;
+  const vals = new Float32Array(HEATMAP_RES * HEATMAP_RES);
+  let minV = Infinity, maxV = -Infinity;
+  for (let iy = 0; iy < HEATMAP_RES; iy++) {
+    for (let ix = 0; ix < HEATMAP_RES; ix++) {
+      const px = (ix / (HEATMAP_RES - 1)) * W;
+      const py = (iy / (HEATMAP_RES - 1)) * D;
+      let chi2 = 0, nleaves = 0;
+      for (const leaf in rssiVec) {
+        const li = leafInfo[leaf];
+        if (!li) continue;
+        const dx = px - li.x, dy = py - li.y, dz = zSample - li.z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (d < 0.1) continue;
+        const predicted = li.p0 - 10 * li.n * Math.log10(d);
+        const r = (rssiVec[leaf] - predicted) / Math.max(1.0, li.sigma);
+        chi2 += r * r;
+        nleaves++;
+      }
+      const v = nleaves > 0 ? chi2 / nleaves : 999;
+      vals[iy * HEATMAP_RES + ix] = v;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+  }
+  // Build vertex colors: bright at minimum (likely position), fading out
+  const colors = heatmapMesh.geometry.attributes.color.array;
+  const range = Math.max(1e-3, maxV - minV);
+  for (let i = 0; i < vals.length; i++) {
+    const t = (vals[i] - minV) / range;     // 0 = best, 1 = worst
+    // Plasma-ish: bright magenta → orange → dark, brighter for lower chi²
+    const intensity = Math.exp(-3 * t);     // sharp fall-off
+    colors[i*3+0] = intensity * 1.0;        // red
+    colors[i*3+1] = intensity * 0.2;        // green
+    colors[i*3+2] = intensity * 0.9;        // blue
+  }
+  heatmapMesh.geometry.attributes.color.needsUpdate = true;
+  // Position the plane to cover the room exactly
+  heatmapMesh.scale.set(W, D, 1);  // plane is in x,y before rotation
+  heatmapMesh.position.set(W / 2, 0.01, D / 2);
+  heatmapMesh.visible = true;
+}
 
 // Slowly rotate the leaf diamonds so their facets catch the light —
 // adds motion that distinguishes them from static spheres of any kind.
@@ -1872,6 +2147,12 @@ function ensureEntityRow(e) {
     }, 350);
     inp.addEventListener('input', save);
     inp.addEventListener('blur', save);
+    // Click anywhere on the row (except the input) → focus this entity
+    row.addEventListener('click', (ev) => {
+      if (ev.target.tagName === 'INPUT') return;
+      setFocused(e.entity_id, 'entity');
+    });
+    row.style.cursor = 'pointer';
     document.getElementById('live-entity-list').appendChild(row);
     liveEntityRowByID.set(e.entity_id, row);
   }
@@ -1927,6 +2208,11 @@ async function pollLive() {
   try {
     const r = await fetch('/api/live').then(r => r.json());
     applyLiveDevices(r.devices || [], r.entities || []);
+    // If a device is focused, refresh the floor heatmap + the badge.
+    if (focusedKey) {
+      rebuildHeatmap();
+      setFocused(focusedKey, focusedKind);  // re-read fresh state for badge
+    }
     // Render entity rows in sidebar (above the per-track list)
     const entityListEl = document.getElementById('live-entity-list');
     const seenEnt = new Set();
