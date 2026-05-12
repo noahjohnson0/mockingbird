@@ -359,7 +359,10 @@ static void startOTA() {
 }
 
 static void startBLE() {
-    NimBLEDevice::init("");
+    // Set the device name to our hostname so other leaves see "mockingbird-XXXXXX"
+    // in advertising data and can identify us.
+    NimBLEDevice::init(deviceHostname().c_str());
+
     auto *pScan = NimBLEDevice::getScan();
     pScan->setAdvertisedDeviceCallbacks(new ScanCB(), /*wantDup=*/true);
     pScan->setActiveScan(true);
@@ -368,6 +371,31 @@ static void startBLE() {
     pScan->setMaxResults(0);
     pScan->start(0, nullptr, false);
     Serial.println("[ble] scanner running");
+
+    // ---- Tier-1 calibration: advertise our existence to other leaves ----
+    // Each leaf transmits a small BLE advertisement every ~1s containing its
+    // hostname. Other leaves' scanners pick it up like any other BLE device,
+    // and the collector can identify these "leaf-to-leaf" observations by the
+    // name prefix. Since we have known distances between every pair of leaves,
+    // these are HIGH-FIDELITY ground-truth (rssi, distance) calibration points.
+    auto *pAdv = NimBLEDevice::getAdvertising();
+    NimBLEAdvertisementData adv;
+    adv.setName(deviceHostname().c_str());  // "mockingbird-XXXXXX"
+    // Use company ID 0xFFFF (test/reserved, IEEE-recognized for non-production
+    // use) followed by magic "MOCK" so the collector can quickly identify
+    // leaf-source observations.
+    std::string manuf;
+    manuf.push_back((char)0xFF);
+    manuf.push_back((char)0xFF);
+    manuf += "MOCK";
+    adv.setManufacturerData(manuf);
+    pAdv->setAdvertisementData(adv);
+    // 1s advertising interval (NimBLE uses 0.625ms units; 1600 = 1000ms)
+    pAdv->setMinInterval(1600);
+    pAdv->setMaxInterval(1600);
+    pAdv->start();
+    Serial.printf("[ble] advertising as %s (1s interval)\n",
+                  deviceHostname().c_str());
 }
 
 // ---------- main ----------
