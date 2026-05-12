@@ -614,6 +614,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 calibration=cal, positions=positions,
                 multilat_bounds=multilat_bounds,
             )
+            entities = mockingbird_tracks.store.entities_snapshot(now=now)
             return self._json({
                 "as_of": now,
                 "window_s": LIVE_WINDOW_S,
@@ -624,6 +625,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "fit_age_s": round(now - cal.fit_ts, 1),
                 }),
                 "devices": tracked,
+                "entities": entities,
             })
 
         if url.path == "/api/room":

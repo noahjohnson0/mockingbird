@@ -1274,8 +1274,6 @@ function pushTrailPoint(entry, d) {
 function ensureEntityOverlay(entity_id, color) {
   let e = entityByID.get(entity_id);
   if (e) return e;
-  // Bigger sphere than per-track (0.14 r), more emissive, semi-translucent
-  // so member tracks are still visible inside.
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(0.14, 24, 16),
     new THREE.MeshStandardMaterial({
@@ -1283,7 +1281,6 @@ function ensureEntityOverlay(entity_id, color) {
       transparent: true, opacity: 0.42, depthWrite: false,
     })
   );
-  // Halo ring (a flat torus rendered side-on) makes it visually distinct
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(0.22, 0.012, 8, 32),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.65, depthWrite: false })
@@ -1300,43 +1297,48 @@ function ensureEntityOverlay(entity_id, color) {
   const label = new CSS2DObject(labelEl);
   label.position.set(0, 0.34, 0);
   sphere.add(label);
+  // Entity-level uncertainty ellipsoid — should be MUCH tighter than per-
+  // track because of the √N fusion benefit.
+  const ellipsoid = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 12, 6)),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })
+  );
+  // Entity velocity arrow (white/brighter to stand out from per-track arrows)
+  const velArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0),
+    0.001, 0xffffff, 0.08, 0.05,
+  );
+  velArrow.visible = false;
   entityGroup.add(sphere);
-  e = { sphere, ring, labelEl, color, lastSeen: 0, target: new THREE.Vector3() };
+  entityGroup.add(ellipsoid);
+  entityGroup.add(velArrow);
+  e = { sphere, ring, ellipsoid, velArrow, labelEl, color,
+        lastSeen: 0, target: new THREE.Vector3() };
   entityByID.set(entity_id, e);
   return e;
 }
 
-function applyLiveDevices(devices) {
+function applyLiveDevices(devices, entities) {
   const now = performance.now();
-  // First pass: group devices by entity_id (skip singletons)
-  const entityMembers = new Map();  // entity_id → [device, ...]
-  for (const d of devices) {
-    if (!d.entity_id || (d.entity_size || 1) < 2) continue;
-    if (!entityMembers.has(d.entity_id)) entityMembers.set(d.entity_id, []);
-    entityMembers.get(d.entity_id).push(d);
-  }
-  // Update / create entity overlays
-  for (const [eid, members] of entityMembers) {
-    // Weighted centroid: average member positions weighted by inverse σ
-    // (smaller σ = more weight). When no covariance available, equal weights.
-    let sx = 0, sy = 0, sz = 0, sw = 0;
-    for (const m of members) {
-      const cov = m.cov;
-      const sigma2 = cov ? Math.max(0.01, (cov[0][0] + cov[1][1] + cov[2][2]) / 3) : 1.0;
-      const w = 1.0 / sigma2;
-      sx += w * m.x; sy += w * m.y; sz += w * m.z; sw += w;
-    }
-    if (sw === 0) continue;
-    const fx = sx / sw, fy = sy / sw, fz = sz / sw;
-    // Pick the entity's display color from the longest-lived member's track_id
-    // (which is already what server uses for the entity_name hash, indirectly)
-    const overlay = ensureEntityOverlay(eid, trackColor(eid));
-    overlay.target.set(fx, fz, fy);  // room→three swap
+  // Entity overlays — server now fuses member tracks (information-form
+  // average of MLE positions + entity-level Kalman) and gives us the
+  // result. Client just renders it.
+  for (const e of (entities || [])) {
+    const overlay = ensureEntityOverlay(e.entity_id, trackColor(e.entity_id));
+    overlay.target.set(e.x, e.z, e.y);  // room→three swap
     overlay.lastSeen = now;
-    overlay.labelEl.textContent = `${members[0].entity_name || eid.slice(0,6)} · ${members.length} tracks`;
+    overlay.lastEntity = e;
+    // σ summary in label so you can see the fusion benefit at a glance
+    const cov = e.cov;
+    const sigma = cov
+      ? Math.sqrt(Math.max(0, (cov[0][0] + cov[1][1] + cov[2][2]) / 3))
+      : null;
+    overlay.labelEl.textContent =
+      `${e.entity_name} · ${e.n_tracks} tracks` +
+      (sigma != null ? ` · σ=${sigma.toFixed(2)}m` : '');
     overlay.labelEl.style.display = showAllLabels ? '' : 'none';
   }
-  // Now individual tracks
+  // Individual tracks (always rendered)
   for (const d of devices) {
     const entry = ensureTrackEntry(d.track_id);
     entry.target.set(d.x, d.z, d.y);
@@ -1382,11 +1384,12 @@ function tickDeviceAnimation() {
   // Animate entity overlays (slow lerp like tracks, fade after STALE)
   for (const [eid, eOv] of entityByID) {
     eOv.sphere.position.lerp(eOv.target, LERP_RATE);
-    // Slow rotation of the halo ring for visual appeal
     eOv.ring.rotation.z += 0.012;
     const age = now - eOv.lastSeen;
     if (age > REMOVE_AFTER_MS) {
       entityGroup.remove(eOv.sphere);
+      entityGroup.remove(eOv.ellipsoid);
+      entityGroup.remove(eOv.velArrow);
       entityByID.delete(eid);
       continue;
     }
@@ -1395,6 +1398,19 @@ function tickDeviceAnimation() {
     eOv.sphere.material.opacity = 0.42 * fadeMul;
     eOv.ring.material.opacity   = 0.65 * fadeMul;
     eOv.labelEl.style.opacity   = fadeMul;
+    // Ellipsoid follows the (smoothly-lerped) entity sphere
+    if (eOv.lastEntity && eOv.lastEntity.cov && showEllipsoids) {
+      eOv.ellipsoid.visible = true;
+      eOv.ellipsoid.material.opacity = 0.55 * fadeMul;
+      updateEllipsoidFromCov(eOv, eOv.lastEntity.cov, eOv.sphere.position);
+    } else {
+      eOv.ellipsoid.visible = false;
+    }
+    if (eOv.lastEntity && eOv.lastEntity.velocity) {
+      updateVelocityArrow(eOv, eOv.lastEntity.velocity, eOv.sphere.position);
+    } else {
+      eOv.velArrow.visible = false;
+    }
   }
   for (const [tid, e] of deviceByTrack) {
     e.sphere.position.lerp(e.target, LERP_RATE);
@@ -1841,7 +1857,7 @@ async function pollLive() {
   startFetch();
   try {
     const r = await fetch('/api/live').then(r => r.json());
-    applyLiveDevices(r.devices || []);
+    applyLiveDevices(r.devices || [], r.entities || []);
     const devs = r.devices || [];
     liveCountEl.textContent = devs.length;
     const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
