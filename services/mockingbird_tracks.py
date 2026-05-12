@@ -297,6 +297,34 @@ def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
                 P[i][j] *= 0.1
                 P[j][i] = P[i][j]
             P[i][i] = 0.01
+        # Stationary anchor: maintain a rolling mean of measurements
+        # since the device went stationary, then SNAP the displayed
+        # position to that mean instead of letting each new MLE jitter
+        # the visible position. After ~20 samples (≈10s of stationary
+        # observation), the mean is much tighter than any single MLE.
+        if track.stationary_since_ts is None:
+            track.stationary_since_ts = now
+            track.stationary_anchor = measurement_xyz
+            track.stationary_count = 1
+        else:
+            # Recursive mean update: μ_new = μ_old + (z - μ_old) / (n+1)
+            anchor = track.stationary_anchor
+            n = track.stationary_count
+            track.stationary_anchor = (
+                anchor[0] + (measurement_xyz[0] - anchor[0]) / (n + 1),
+                anchor[1] + (measurement_xyz[1] - anchor[1]) / (n + 1),
+                anchor[2] + (measurement_xyz[2] - anchor[2]) / (n + 1),
+            )
+            track.stationary_count = n + 1
+        # Overwrite displayed Kalman position with the anchor
+        x[0] = track.stationary_anchor[0]
+        x[1] = track.stationary_anchor[1]
+        x[2] = track.stationary_anchor[2]
+    else:
+        # Device moved — reset stationary anchor
+        track.stationary_since_ts = None
+        track.stationary_anchor = None
+        track.stationary_count = 0
     # Velocity magnitude clamp: even without ZUPT, if the filter's
     # velocity estimate is below the UI's "real motion" threshold
     # (20 cm/s), clamp to zero. The threshold matches the client's
@@ -371,6 +399,13 @@ class Track:
     last_trail_ts: float = 0.0
     last_cov_3x3: list | None = None    # MLE position covariance (3×3 list)
     last_rmse_m: float | None = None    # MLE residual RMS in meters
+    # Stationary anchor: once a track is confirmed stationary, freeze
+    # its displayed position to the LONG-RUNNING average of stationary
+    # measurements. Per-tick MLE jitter is real noise; averaging it
+    # over the stationary period delivers a stable position.
+    stationary_since_ts: float | None = None
+    stationary_anchor: tuple[float, float, float] | None = None  # rolling mean
+    stationary_count: int = 0
     # Kalman state: [x, y, z, vx, vy, vz], 6×6 covariance
     kf_state: list[float] | None = None
     kf_cov: list[list[float]] | None = None
@@ -397,21 +432,66 @@ class Track:
             )
         if pos is not None:
             self.raw_position = pos
-            # Adaptive EWMA on position: small jumps (≤ 0.4m) trusted
-            # heavily, big jumps (≥ 2m) treated as probable noise.
+            # Adaptive EWMA: smoothing is *much* heavier for tracks
+            # without a covariance estimate (centroid-only — inherently
+            # noisy with σ ~ 1-2 m). Without that, a centroid device's
+            # displayed position bounces 30-300 cm every poll just from
+            # raw RSSI jitter.
+            is_centroid = self.last_cov_3x3 is None
             if self.last_position is None:
                 self.last_position = pos
             else:
                 lx, ly, lz = self.last_position
                 jump = math.sqrt((pos[0]-lx)**2 + (pos[1]-ly)**2 + (pos[2]-lz)**2)
-                a = _smooth_alpha(jump)
+                if is_centroid:
+                    # Heavy smoothing: only 8% update per sample. Big
+                    # jumps still treated as noise — even less weight.
+                    a = 0.08 if jump < 0.5 else 0.04 if jump < 2.0 else 0.02
+                else:
+                    a = _smooth_alpha(jump)
                 self.last_position = (
                     a * pos[0] + (1 - a) * lx,
                     a * pos[1] + (1 - a) * ly,
                     a * pos[2] + (1 - a) * lz,
                 )
-            # Use smoothed position for the trail too — trails read as
-            # smooth motion instead of noisy zigzags.
+            # Stationary anchor: now that EWMA has heavily smoothed the
+            # displayed position, the trail jitter is much smaller and
+            # we can use a tighter ZUPT basin. After EWMA smoothing,
+            # successive last_position values typically differ by 10-30cm
+            # even for noisy centroid tracks — so a 0.6m basin works.
+            zupt_r = 0.6 if self.last_cov_3x3 is None else min(
+                1.0, max(0.3, 1.5 * math.sqrt(
+                    sum(self.last_cov_3x3[i][i] for i in range(3)) / 3))
+            )
+            recent = list(self.trail)[-ZUPT_HISTORY_N:]
+            if _is_stationary([TrailPoint(0, *self.last_position)] + recent, radius_m=zupt_r):
+                if self.stationary_since_ts is None:
+                    self.stationary_since_ts = now
+                    self.stationary_anchor = self.last_position
+                    self.stationary_count = 1
+                else:
+                    a = self.stationary_anchor
+                    n = self.stationary_count
+                    # Bounded rolling mean — when count gets huge, slow the
+                    # rate of mean update so a single big jump can't shift
+                    # the anchor much (heavy filtering).
+                    eff_n = min(n, 40)  # cap at ~40 samples = 20s history weight
+                    self.stationary_anchor = (
+                        a[0] + (self.last_position[0] - a[0]) / (eff_n + 1),
+                        a[1] + (self.last_position[1] - a[1]) / (eff_n + 1),
+                        a[2] + (self.last_position[2] - a[2]) / (eff_n + 1),
+                    )
+                    self.stationary_count = n + 1
+                # Snap displayed position to the anchor (after ≥3 samples
+                # so the first reading isn't yet displayed as "anchored")
+                if self.stationary_count >= 3:
+                    self.last_position = self.stationary_anchor
+            else:
+                # Moving — reset anchor
+                self.stationary_since_ts = None
+                self.stationary_anchor = None
+                self.stationary_count = 0
+            # Use smoothed/anchored position for the trail too
             if now - self.last_trail_ts >= MIN_TRAIL_DELTA_S:
                 self.trail.append(TrailPoint(now, *self.last_position))
                 self.last_trail_ts = now
@@ -444,6 +524,10 @@ class Entity:
     last_cov_3x3: list | None = None    # Fused covariance after information-form averaging
     n_tracks_used: int = 0              # How many members contributed to the fused measurement
     pos_history: deque = field(default_factory=lambda: deque(maxlen=8))
+    # Stationary anchor for entities (same logic as Track)
+    stationary_since_ts: float | None = None
+    stationary_anchor: tuple[float, float, float] | None = None
+    stationary_count: int = 0
     # Entity-level Kalman state (separate from per-track filters): when
     # all N member tracks see the SAME physical device, their MLE
     # measurements are independent-ish observations of one location and
@@ -722,6 +806,32 @@ class TrackStore:
                                 ent.kf_cov[i][j] *= 0.1
                                 ent.kf_cov[j][i] = ent.kf_cov[i][j]
                             ent.kf_cov[i][i] = 0.01
+                # Stationary anchor: rolling mean of fused measurements.
+                # After ~10s of stationary observation, this is much
+                # tighter than any single fused MLE estimate.
+                if ent.stationary_since_ts is None:
+                    ent.stationary_since_ts = now
+                    ent.stationary_anchor = tuple(mu)
+                    ent.stationary_count = 1
+                else:
+                    a = ent.stationary_anchor
+                    nc = ent.stationary_count
+                    ent.stationary_anchor = (
+                        a[0] + (mu[0] - a[0]) / (nc + 1),
+                        a[1] + (mu[1] - a[1]) / (nc + 1),
+                        a[2] + (mu[2] - a[2]) / (nc + 1),
+                    )
+                    ent.stationary_count = nc + 1
+                # Snap displayed position to the rolling mean
+                if ent.kf_state is not None:
+                    ent.kf_state[0] = ent.stationary_anchor[0]
+                    ent.kf_state[1] = ent.stationary_anchor[1]
+                    ent.kf_state[2] = ent.stationary_anchor[2]
+                ent.last_position = ent.stationary_anchor
+            else:
+                ent.stationary_since_ts = None
+                ent.stationary_anchor = None
+                ent.stationary_count = 0
 
 
     def step(self, devices: Iterable[dict], now: float | None = None,
@@ -908,6 +1018,11 @@ class TrackStore:
                     "velocity": vel,
                     "age_s": round(now - ent.first_seen, 1),
                     "track_ids": list(ent.track_ids),
+                    "stationary_for_s": (
+                        round(now - ent.stationary_since_ts, 1)
+                        if ent.stationary_since_ts is not None else 0
+                    ),
+                    "stationary_samples": ent.stationary_count,
                 })
         out.sort(key=lambda e: -e["n_tracks"])  # biggest clusters first
         return out
