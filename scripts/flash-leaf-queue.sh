@@ -26,7 +26,7 @@ if [[ "$CHIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 else
     HOST="mockingbird-${CHIP}.local"
 fi
-VERSION="0.4.1-q${QSIZE}"
+VERSION="0.5.0-q${QSIZE}"
 
 case "$QSIZE" in
     64)  ENV="ota" ;;

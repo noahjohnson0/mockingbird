@@ -25,6 +25,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import mockingbird_tracks       # noqa: E402
 import mockingbird_calibration  # noqa: E402
 
+# Tier-1 calibration: leaves advertise BLE in firmware v0.5.0+, and other
+# leaves observe each other. We auto-refresh calibration_point rows for
+# these inter-leaf observations every LEAF_CAL_REFRESH_S so the fit always
+# has fresh ground-truth data without manual intervention.
+LEAF_CAL_REFRESH_S = 60
+LEAF_CAL_WINDOW_S = 60   # rolling window of inter-leaf data per refresh
+
 # Latest fitted path-loss params (None until first /api/calibrate call).
 # When set, /api/live uses multilateration in place of weighted-centroid.
 CALIBRATION: mockingbird_calibration.CalibrationParams | None = None
@@ -798,10 +805,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, b"not found", "text/plain")
 
 
+def leaf_calibration_loop() -> None:
+    """Background task: every LEAF_CAL_REFRESH_S, sweep the obs table for
+    leaf-to-leaf BLE advertisements (firmware v0.5.0+: each leaf advertises
+    its hostname). For each transmitting leaf, identify the BD_ADDR it's
+    using and refresh a calibration_point at the transmitter's known
+    position. fit_pathloss() will then incorporate the inter-leaf RSSI
+    matrix as high-quality ground-truth pairs."""
+    import threading
+    def run() -> None:
+        while True:
+            try:
+                db = open_db()
+                now = time.time()
+                positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
+                    "SELECT leaf, x, y, z FROM leaf_position"
+                )}
+                # For each leaf, find the BLE BD_ADDR it's advertising under
+                # (i.e. the MAC most frequently associated with name=hostname)
+                for leaf, pos in positions.items():
+                    row = db.execute(
+                        "SELECT mac FROM obs INDEXED BY idx_obs_ts "
+                        "WHERE ts >= ? AND name = ? "
+                        "GROUP BY mac ORDER BY COUNT(*) DESC LIMIT 1",
+                        (now - LEAF_CAL_WINDOW_S, leaf),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    mac = row[0]
+                    # Refresh: delete any prior leaf-advert anchor for this
+                    # leaf, then insert a fresh one with the latest window.
+                    db.execute(
+                        "DELETE FROM calibration_points WHERE label = ?",
+                        (f"leaf-advert · {leaf}",),
+                    )
+                    db.execute(
+                        "INSERT INTO calibration_points("
+                        "ts_start, ts_end, mac, track_name, x, y, z, label"
+                        ") VALUES (?,?,?,?,?,?,?,?)",
+                        (now - LEAF_CAL_WINDOW_S, now, mac, "leaf-self-advert",
+                         pos[0], pos[1], pos[2], f"leaf-advert · {leaf}"),
+                    )
+            except Exception:
+                import traceback; traceback.print_exc(file=sys.stderr)
+            time.sleep(LEAF_CAL_REFRESH_S)
+    t = threading.Thread(target=run, daemon=True, name="leaf-calibration")
+    t.start()
+    sys.stderr.write(f"{time.strftime('%H:%M:%S')} leaf-calibration loop started "
+                     f"(refresh every {LEAF_CAL_REFRESH_S}s)\n")
+
+
 def main() -> int:
     addr = ("0.0.0.0", PORT)
     server = http.server.ThreadingHTTPServer(addr, Handler)
     sys.stderr.write(f"{time.strftime('%H:%M:%S')} mockingbird-dashboard listening on {addr[0]}:{addr[1]}\n")
+    leaf_calibration_loop()
     sys.stderr.write(f"  DB:   {DB_PATH}\n  HTML: {HTML_PATH}\n")
     try:
         server.serve_forever()
