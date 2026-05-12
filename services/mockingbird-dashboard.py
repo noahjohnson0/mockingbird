@@ -811,14 +811,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def leaf_calibration_loop() -> None:
-    """Background task: every LEAF_CAL_REFRESH_S, sweep the obs table for
-    leaf-to-leaf BLE advertisements (firmware v0.5.0+: each leaf advertises
-    its hostname). For each transmitting leaf, identify the BD_ADDR it's
-    using and refresh a calibration_point at the transmitter's known
-    position. fit_pathloss() will then incorporate the inter-leaf RSSI
-    matrix as high-quality ground-truth pairs."""
+    """Background task: every LEAF_CAL_REFRESH_S, refresh inter-leaf
+    anchor calibration_points AND re-fit the path-loss model. This way
+    a fresh dashboard process auto-calibrates within the first minute
+    and stays calibrated continuously after that, no manual button-press
+    needed.
+    """
     import threading
+    global CALIBRATION
     def run() -> None:
+        global CALIBRATION
+        # Wait briefly for the first obs to flow in
+        time.sleep(15)
         while True:
             try:
                 db = open_db()
@@ -826,8 +830,7 @@ def leaf_calibration_loop() -> None:
                 positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
                     "SELECT leaf, x, y, z FROM leaf_position"
                 )}
-                # For each leaf, find the BLE BD_ADDR it's advertising under
-                # (i.e. the MAC most frequently associated with name=hostname)
+                # Refresh leaf-advert anchor points
                 for leaf, pos in positions.items():
                     row = db.execute(
                         "SELECT mac FROM obs INDEXED BY idx_obs_ts "
@@ -838,8 +841,6 @@ def leaf_calibration_loop() -> None:
                     if not row:
                         continue
                     mac = row[0]
-                    # Refresh: delete any prior leaf-advert anchor for this
-                    # leaf, then insert a fresh one with the latest window.
                     db.execute(
                         "DELETE FROM calibration_points WHERE label = ?",
                         (f"leaf-advert · {leaf}",),
@@ -851,13 +852,24 @@ def leaf_calibration_loop() -> None:
                         (now - LEAF_CAL_WINDOW_S, now, mac, "leaf-self-advert",
                          pos[0], pos[1], pos[2], f"leaf-advert · {leaf}"),
                     )
+                # Auto-refit the path-loss model from the refreshed anchors
+                if len(positions) >= 4:
+                    cal = mockingbird_calibration.fit_pathloss(db, positions)
+                    if cal is not None:
+                        CALIBRATION = cal
+                        sys.stderr.write(
+                            f"{time.strftime('%H:%M:%S')} auto-fit: "
+                            f"P0={cal.p0} n={cal.n} rmse={cal.rmse_dbm}dB "
+                            f"({cal.n_points}pts {cal.n_devices}anchors "
+                            f"{len(cal.per_leaf)}/8 per-leaf models)\n"
+                        )
             except Exception:
                 import traceback; traceback.print_exc(file=sys.stderr)
             time.sleep(LEAF_CAL_REFRESH_S)
     t = threading.Thread(target=run, daemon=True, name="leaf-calibration")
     t.start()
     sys.stderr.write(f"{time.strftime('%H:%M:%S')} leaf-calibration loop started "
-                     f"(refresh every {LEAF_CAL_REFRESH_S}s)\n")
+                     f"(refresh + auto-fit every {LEAF_CAL_REFRESH_S}s)\n")
 
 
 def main() -> int:
