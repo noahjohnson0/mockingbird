@@ -455,11 +455,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cal = CALIBRATION
             if cal is None:
                 return self._json({"calibrated": False})
+            per_leaf = {
+                leaf: {"p0": v[0], "n": v[1], "sigma_dbm": v[2]}
+                for leaf, v in (cal.per_leaf or {}).items()
+            }
             return self._json({
                 "calibrated": True,
                 "p0": cal.p0, "n": cal.n, "rmse_dbm": cal.rmse_dbm,
                 "n_points": cal.n_points, "n_devices": cal.n_devices,
                 "fit_ts": cal.fit_ts, "fit_age_s": round(time.time() - cal.fit_ts, 1),
+                "per_leaf": per_leaf,
             })
 
         if url.path == "/api/leaves":
