@@ -45,10 +45,17 @@ class CalibrationParams:
     n_devices: int       # distinct devices contributing data
     fit_ts: float        # when this fit was computed
     # Per-leaf models (when computed): leaf_id → (P0_i, n_i, sigma_i)
-    # sigma_i is the residual std-dev for THIS leaf, used as MLE weight
-    # in multilateration. Falls back to global p0/n/rmse if a leaf has
-    # too few data points to fit individually.
     per_leaf: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    # Per-leaf TX bias: how much this leaf transmits HOT (+) or COLD (-)
+    # vs. the model's predicted P0. Derived from leaf-to-leaf advertising
+    # data: this leaf's TX bias is the mean (observed - predicted) across
+    # ALL receiver leaves observing it.
+    tx_bias: dict[str, float] = field(default_factory=dict)
+    # Per-leaf RX bias: how much this leaf RECEIVES hot/cold compared to
+    # the model. Derived from the dual decomposition: this leaf's RX bias
+    # is the mean residual across all sources transmitting to it, minus
+    # any TX bias of those sources.
+    rx_bias: dict[str, float] = field(default_factory=dict)
 
 
 def _solve_2x2(a, b) -> tuple[float, float]:
@@ -182,10 +189,11 @@ def fit_pathloss(db: sqlite3.Connection,
         residuals = [y - (p0 + n * x) for x, y in zip(cxs_k, cys_k)]
         rmse = math.sqrt(sum(r * r for r in residuals) / len(residuals))
         per_leaf = _fit_per_leaf_models(db, positions, now, p0, n)
+        tx_bias, rx_bias = _fit_leaf_biases(db, positions, p0, n, per_leaf, now)
         return CalibrationParams(
             p0=round(p0, 2), n=round(n, 3), rmse_dbm=round(rmse, 2),
             n_points=len(cxs_k), n_devices=n_anchors, fit_ts=now,
-            per_leaf=per_leaf,
+            per_leaf=per_leaf, tx_bias=tx_bias, rx_bias=rx_bias,
         )
 
     # ---- Path 2: bootstrap from current observation centroids ----
@@ -284,8 +292,103 @@ def fit_pathloss(db: sqlite3.Connection,
     )
 
 
+def _fit_leaf_biases(db, positions, fallback_p0, fallback_n, per_leaf,
+                     now: float, window_s: int = 90,
+                     ) -> tuple[dict[str, float], dict[str, float]]:
+    """Decompose leaf-pair residuals into per-leaf TX bias + RX bias.
+
+    For each ordered pair (A=transmitter, B=receiver) with known
+    distance d_AB and observed mean RSSI rssi_AB:
+        residual_AB = rssi_AB - (P0_A - 10·n_A·log10(d_AB))
+                    = TX_A + RX_B + noise
+
+    With 56 such equations (8×7 directional pairs) and 16 unknowns
+    (TX_i, RX_i per leaf), this is over-determined. We use a simple
+    iterative ALS-style decomposition:
+      - Initialize TX_i = mean residual when leaf i transmits
+      - Initialize RX_i = mean residual when leaf i receives, minus
+        the average TX bias of sources
+      - Iterate until convergence
+
+    Returns ({leaf_id: tx_bias_dbm}, {leaf_id: rx_bias_dbm}).
+    """
+    if len(positions) < 3:
+        return ({}, {})
+    # Build the (tx_leaf, rx_leaf, residual) list from anchored cal points
+    # (the leaf-advert anchor points have transmitter = leaf at known position)
+    anchor_rows = db.execute(
+        "SELECT mac, x, y, z, ts_start, ts_end, label FROM calibration_points "
+        "WHERE ts_end <= ? AND label LIKE 'leaf-advert%' ORDER BY ts_start DESC",
+        (now,),
+    ).fetchall()
+    # Build a lookup from "leaf BLE BD_ADDR" → "leaf_id"
+    # Each leaf's BD_ADDR comes from the mac column in its leaf-advert anchor.
+    mac_to_leaf: dict[str, str] = {}
+    for mac, ax, ay, az, _ts_s, _ts_e, label in anchor_rows:
+        leaf_id = (label or "").replace("leaf-advert · ", "").strip()
+        if leaf_id in positions:
+            mac_to_leaf[mac] = leaf_id
+    if not mac_to_leaf:
+        return ({}, {})
+    residuals: list[tuple[str, str, float]] = []   # (tx, rx, residual)
+    for mac, ax, ay, az, ts_s, ts_e, _label in anchor_rows:
+        tx = mac_to_leaf.get(mac)
+        if not tx:
+            continue
+        # For each receiver leaf, mean RSSI of obs of this mac in window
+        rx_rows = db.execute(
+            "SELECT leaf, AVG(rssi), COUNT(*) FROM obs INDEXED BY idx_obs_leaf_ts "
+            "WHERE mac = ? AND ts >= ? AND ts <= ? GROUP BY leaf",
+            (mac, ts_s, ts_e),
+        ).fetchall()
+        for rx, mean_rssi, cnt in rx_rows:
+            if rx == tx or cnt < 3 or rx not in positions:
+                continue
+            rxp = positions[rx]
+            d = math.sqrt((ax - rxp[0])**2 + (ay - rxp[1])**2 + (az - rxp[2])**2)
+            if d < 0.3 or d > 12.0:
+                continue
+            # Predict using per-leaf model of the RECEIVER's path-loss
+            if rx in per_leaf:
+                p0_i, n_i, _sigma = per_leaf[rx]
+            else:
+                p0_i, n_i = fallback_p0, fallback_n
+            predicted = p0_i - 10.0 * n_i * math.log10(d)
+            residuals.append((tx, rx, mean_rssi - predicted))
+    if len(residuals) < 4:
+        return ({}, {})
+    # ALS decomposition: alternate updating tx_bias (holding rx fixed)
+    # and rx_bias (holding tx fixed). Each is a simple per-leaf mean of
+    # (residual - other_side_bias). Constrain mean(tx) = 0 so the system
+    # is identifiable (otherwise tx and rx can absorb arbitrary constants).
+    tx_bias = {leaf: 0.0 for leaf in positions}
+    rx_bias = {leaf: 0.0 for leaf in positions}
+    for _ in range(20):
+        # Update tx_bias: for each leaf, mean of (residual - rx_bias[receiver])
+        # over all pairs where leaf is the transmitter
+        new_tx: dict[str, list[float]] = {leaf: [] for leaf in positions}
+        for tx, rx, r in residuals:
+            new_tx[tx].append(r - rx_bias.get(rx, 0.0))
+        for leaf in tx_bias:
+            if new_tx[leaf]:
+                tx_bias[leaf] = sum(new_tx[leaf]) / len(new_tx[leaf])
+        # Constrain mean(tx) = 0
+        m = sum(tx_bias.values()) / len(tx_bias)
+        for leaf in tx_bias:
+            tx_bias[leaf] -= m
+        # Update rx_bias: per-leaf mean of (residual - tx_bias[transmitter])
+        new_rx: dict[str, list[float]] = {leaf: [] for leaf in positions}
+        for tx, rx, r in residuals:
+            new_rx[rx].append(r - tx_bias.get(tx, 0.0))
+        for leaf in rx_bias:
+            if new_rx[leaf]:
+                rx_bias[leaf] = sum(new_rx[leaf]) / len(new_rx[leaf])
+    return ({k: round(v, 2) for k, v in tx_bias.items()},
+            {k: round(v, 2) for k, v in rx_bias.items()})
+
+
 def _fit_per_leaf_models(db, positions, now, fallback_p0, fallback_n,
-                         window_s: int = 90, min_pts: int = 4,
+                         window_s: int = 90, min_pts: int = 3,
                          ) -> dict[str, tuple[float, float, float]]:
     """For each leaf, fit its own path-loss model from data where it was
     the RECEIVER. Returns {leaf_id: (P0_i, n_i, sigma_i)}.
@@ -323,7 +426,7 @@ def _fit_per_leaf_models(db, positions, now, fallback_p0, fallback_n,
                 "WHERE leaf = ? AND mac = ? AND ts >= ? AND ts <= ?",
                 (receiver_leaf, mac, ts_s, ts_e),
             ).fetchone()
-            if not rssi_row or not rssi_row[1] or rssi_row[1] < 2:
+            if not rssi_row or not rssi_row[1] or rssi_row[1] < 1:
                 continue
             mean_rssi = rssi_row[0]
             if mean_rssi < -90:
@@ -410,7 +513,14 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
             p0_i, n_i, sigma_i = params.p0, params.n, params.rmse_dbm or 5.0
         if n_i <= 0:
             continue
-        d_i = 10.0 ** ((p0_i - rssi) / (10.0 * n_i))
+        # Bias-correct the observed RSSI using the receiver leaf's RX
+        # bias. (TX bias is a property of the TRANSMITTER, which here is
+        # the unknown device — we don't know its TX bias, so we don't
+        # correct for it. Each device's TX power gets absorbed into the
+        # path-loss fit if it differs much from the calibration source.)
+        rx_b = params.rx_bias.get(leaf, 0.0) if params.rx_bias else 0.0
+        corrected_rssi = rssi - rx_b
+        d_i = 10.0 ** ((p0_i - corrected_rssi) / (10.0 * n_i))
         if not math.isfinite(d_i) or d_i <= 0 or d_i > 30:
             continue
         # delta-method variance on d from σ on rssi

@@ -456,7 +456,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if cal is None:
                 return self._json({"calibrated": False})
             per_leaf = {
-                leaf: {"p0": v[0], "n": v[1], "sigma_dbm": v[2]}
+                leaf: {
+                    "p0": v[0], "n": v[1], "sigma_dbm": v[2],
+                    "tx_bias_dbm": (cal.tx_bias or {}).get(leaf),
+                    "rx_bias_dbm": (cal.rx_bias or {}).get(leaf),
+                }
                 for leaf, v in (cal.per_leaf or {}).items()
             }
             return self._json({
