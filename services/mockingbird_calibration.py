@@ -443,19 +443,27 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
     if p is None:
         return None
 
-    # ---- Stage 2: weighted Gauss-Newton iterations on actual distances ----
-    for _ in range(5):
+    # ---- Stage 2: weighted Gauss-Newton + IRLS (Huber) ----
+    # Classic robust regression: after each iteration, downweight any
+    # leaf whose distance residual exceeds the Huber threshold (k·σ).
+    # Without this, a single leaf with anomalous multipath (body blocking
+    # one corner, an unexpected reflection) can drag the entire MLE
+    # estimate by 1-2 m. With it, that leaf gets weighted to ~0 and the
+    # solution snaps to where the consensus of clean leaves says it is.
+    HUBER_K = 1.5  # meters of distance residual considered "still inlier"
+    iter_weights = [wi for (_pos, _d, wi) in items]
+    for it in range(6):
         J: list[list[float]] = []
         r_vec: list[float] = []
         ws: list[float] = []
-        for (xi, yi, zi), di, wi in items:
+        for k, ((xi, yi, zi), di, base_w) in enumerate(items):
             dx, dy, dz = p[0] - xi, p[1] - yi, p[2] - zi
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
             if dist < 0.05:
                 continue
             J.append([dx / dist, dy / dist, dz / dist])
             r_vec.append(di - dist)
-            ws.append(wi)
+            ws.append(iter_weights[k])
         if len(J) < 3:
             break
         JtWJ = [[0.0] * 3 for _ in range(3)]
@@ -469,12 +477,21 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
         dp = _solve_3x3(JtWJ, JtWr)
         if dp is None:
             break
-        # Step size limit so a bad iteration can't blow up the solution
         step_norm = math.sqrt(dp[0]**2 + dp[1]**2 + dp[2]**2)
         if step_norm > 2.0:
             scale = 2.0 / step_norm
             dp = (dp[0] * scale, dp[1] * scale, dp[2] * scale)
         p = (p[0] + dp[0], p[1] + dp[1], p[2] + dp[2])
+        # Re-weight using Huber loss BEFORE next iteration: residuals
+        # within HUBER_K keep their full weight, outside get scaled by
+        # k/|r|. This is the IRLS form of robust regression.
+        iter_weights = []
+        for k, ((xi, yi, zi), di, base_w) in enumerate(items):
+            dx, dy, dz = p[0] - xi, p[1] - yi, p[2] - zi
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            r = abs(di - dist)
+            huber = 1.0 if r <= HUBER_K else (HUBER_K / max(r, 1e-3))
+            iter_weights.append(base_w * huber)
         if step_norm < 0.01:
             break
 
