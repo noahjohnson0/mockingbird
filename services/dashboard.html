@@ -508,10 +508,14 @@
   <div class="live-toolbar">
     <label title="Show floating labels next to every leaf diamond and device sphere in 3D. Names are auto-assigned per track; override via sidebar inputs.">
       <input type="checkbox" id="opt-show-all-labels">
-      Show labels in 3D
+      Labels
+    </label>
+    <label title="Show 1σ uncertainty ellipsoids around each MLE-positioned device. The ellipsoid shape shows which axes the system is more/less certain about.">
+      <input type="checkbox" id="opt-show-ellipsoids">
+      σ ellipsoids
     </label>
     <div class="spacer"></div>
-    <button id="opt-clear-names" title="Drop all manual overrides so devices revert to their auto-assigned names">reset overrides</button>
+    <button id="opt-clear-names" title="Drop all manual overrides so devices revert to their auto-assigned names">reset names</button>
   </div>
 
   <h2>devices</h2>
@@ -1014,6 +1018,9 @@ catch { macNames = {}; }
 // Default labels ON now that every device has a short readable name.
 let showAllLabels = localStorage.getItem(SHOW_ALL_KEY);
 showAllLabels = showAllLabels == null ? true : showAllLabels === 'true';
+const ELLIPSOID_KEY = 'mockingbird.showEllipsoids';
+let showEllipsoids = localStorage.getItem(ELLIPSOID_KEY);
+showEllipsoids = showEllipsoids == null ? true : showEllipsoids === 'true';
 
 // Track names come from the server (server-side TrackStore uses the same
 // adjective+bird scheme keyed off track_id). User overrides are stored
@@ -1054,6 +1061,23 @@ function ensureTrackEntry(track_id) {
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false })
   );
   sphere.add(halo);
+  // Uncertainty ellipsoid: 1σ confidence region from the MLE solver's
+  // 3×3 position covariance. A unit sphere whose scale/rotation we set
+  // each tick from the cov eigendecomposition. The ellipsoid sits at
+  // the same world position as the sphere, but is added at scene level
+  // (not as a child of sphere) because we need its own scale/rotation.
+  const ellipsoid = new THREE.Mesh(
+    new THREE.SphereGeometry(1.0, 24, 16),
+    new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.10, wireframe: false, depthWrite: false,
+    })
+  );
+  const ellipsoidEdge = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 16, 10)),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 })
+  );
+  ellipsoid.add(ellipsoidEdge);
+  deviceGroup.add(ellipsoid);
   const labelEl = document.createElement('div');
   labelEl.style.cssText = `
     color: #e6e9ef; font: 10px ui-monospace, "SF Mono", monospace;
@@ -1079,9 +1103,79 @@ function ensureTrackEntry(track_id) {
   trailGroup.add(trail);
 
   entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0,
-            rssi: -100, color, halo, trail, trailGeom };
+            rssi: -100, color, halo, trail, trailGeom,
+            ellipsoid, ellipsoidEdge };
   deviceByTrack.set(track_id, entry);
   return entry;
+}
+
+// 3×3 symmetric eigendecomposition via Jacobi sweeps. Good enough for
+// our 3D covariance matrices — small, well-conditioned. Returns
+// {values: [λ1,λ2,λ3], vectors: [v1, v2, v3] (each a length-3 array)}.
+function eigh3x3(A) {
+  // Copy as mutable
+  const a = [A[0].slice(), A[1].slice(), A[2].slice()];
+  // Identity matrix for accumulated rotations
+  const V = [[1,0,0],[0,1,0],[0,0,1]];
+  for (let sweep = 0; sweep < 12; sweep++) {
+    // Pick the largest off-diagonal
+    let p=0, q=1, max=Math.abs(a[0][1]);
+    if (Math.abs(a[0][2]) > max) { p=0; q=2; max=Math.abs(a[0][2]); }
+    if (Math.abs(a[1][2]) > max) { p=1; q=2; max=Math.abs(a[1][2]); }
+    if (max < 1e-10) break;
+    // Compute Jacobi rotation angle
+    const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+    let t;
+    if (Math.abs(theta) > 1e10) t = 1 / (2 * theta);
+    else t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta*theta + 1));
+    const c = 1 / Math.sqrt(t*t + 1), s = t * c;
+    // Apply rotation to a and V
+    for (let i = 0; i < 3; i++) {
+      if (i !== p && i !== q) {
+        const aip = a[i][p], aiq = a[i][q];
+        a[i][p] = a[p][i] = c*aip - s*aiq;
+        a[i][q] = a[q][i] = s*aip + c*aiq;
+      }
+      const vip = V[i][p], viq = V[i][q];
+      V[i][p] = c*vip - s*viq;
+      V[i][q] = s*vip + c*viq;
+    }
+    const app = a[p][p], aqq = a[q][q], apq = a[p][q];
+    a[p][p] = c*c*app - 2*s*c*apq + s*s*aqq;
+    a[q][q] = s*s*app + 2*s*c*apq + c*c*aqq;
+    a[p][q] = a[q][p] = 0;
+  }
+  return {
+    values: [a[0][0], a[1][1], a[2][2]],
+    vectors: V,
+  };
+}
+
+function updateEllipsoidFromCov(entry, cov, pos) {
+  // cov is 3×3 in ROOM coords: x = room.x, y = room.y, z = room.z.
+  // The 3D scene uses (room.x, room.z, room.y), i.e. swap rows/cols 2 and 3.
+  // The ellipsoid lives in three.js space, so permute.
+  const C = [
+    [cov[0][0], cov[0][2], cov[0][1]],
+    [cov[2][0], cov[2][2], cov[2][1]],
+    [cov[1][0], cov[1][2], cov[1][1]],
+  ];
+  const e = eigh3x3(C);
+  // Each ellipsoid axis = sqrt(eigenvalue), pointing along eigenvector.
+  // Clamp σ to a sane visual range so a numerically-bad covariance
+  // doesn't make a hairy 50 m ellipsoid that hides everything.
+  const sx = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[0]))));
+  const sy = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[1]))));
+  const sz = Math.min(3.0, Math.max(0.15, Math.sqrt(Math.max(0, e.values[2]))));
+  entry.ellipsoid.position.copy(pos);
+  entry.ellipsoid.scale.set(sx, sy, sz);
+  // Build a rotation matrix from the eigenvectors
+  const m = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(e.vectors[0][0], e.vectors[1][0], e.vectors[2][0]),
+    new THREE.Vector3(e.vectors[0][1], e.vectors[1][1], e.vectors[2][1]),
+    new THREE.Vector3(e.vectors[0][2], e.vectors[1][2], e.vectors[2][2]),
+  );
+  entry.ellipsoid.quaternion.setFromRotationMatrix(m);
 }
 
 function styleLabelForKey(labelEl, key) {
@@ -1156,6 +1250,15 @@ function applyLiveDevices(devices) {
     styleLabelForKey(entry.labelEl, d.track_id);
     pushTrailPoint(entry, d);
     updateTrailGeometry(entry, entry.clientTrail, entry.color);
+    // Uncertainty ellipsoid — visible only when we have a real covariance
+    // (i.e., MLE multilat ran) AND the user wants to see it. For centroid-
+    // fallback devices, hide it.
+    if (d.cov && d.pos_method && d.pos_method.startsWith('mle') && showEllipsoids) {
+      entry.ellipsoid.visible = true;
+      updateEllipsoidFromCov(entry, d.cov, entry.target);
+    } else {
+      entry.ellipsoid.visible = false;
+    }
   }
 }
 
@@ -1179,9 +1282,14 @@ function tickDeviceAnimation() {
   const now = performance.now();
   for (const [tid, e] of deviceByTrack) {
     e.sphere.position.lerp(e.target, LERP_RATE);
+    // Ellipsoid follows the (smoothly-lerped) sphere position so it never
+    // teleports — but its scale/rotation are only changed when a fresh
+    // cov arrives (via updateEllipsoidFromCov).
+    if (e.ellipsoid) e.ellipsoid.position.copy(e.sphere.position);
     const age = now - e.lastSeen;
     if (age > REMOVE_AFTER_MS) {
       deviceGroup.remove(e.sphere);
+      if (e.ellipsoid) deviceGroup.remove(e.ellipsoid);
       trailGroup.remove(e.trail);
       e.trailGeom.dispose();
       deviceByTrack.delete(tid);
@@ -1193,11 +1301,19 @@ function tickDeviceAnimation() {
       e.halo.material.opacity = fade * 0.18;
       e.labelEl.style.opacity = fade;
       e.trail.material.opacity = fade * 0.9;
+      if (e.ellipsoid && e.ellipsoid.visible) {
+        e.ellipsoid.material.opacity = fade * 0.10;
+        e.ellipsoidEdge.material.opacity = fade * 0.35;
+      }
     } else {
       e.sphere.material.opacity = 1;
       e.halo.material.opacity = 0.18;
       e.labelEl.style.opacity = 1;
       e.trail.material.opacity = 0.9;
+      if (e.ellipsoid && e.ellipsoid.visible) {
+        e.ellipsoid.material.opacity = 0.10;
+        e.ellipsoidEdge.material.opacity = 0.35;
+      }
     }
   }
 }
@@ -2285,6 +2401,13 @@ showAllEl.addEventListener('change', () => {
   localStorage.setItem(SHOW_ALL_KEY, String(showAllLabels));
   refreshDeviceLabels();
   toast(showAllLabels ? 'showing all device labels' : 'showing only named devices');
+});
+const ellipsoidEl = document.getElementById('opt-show-ellipsoids');
+ellipsoidEl.checked = showEllipsoids;
+ellipsoidEl.addEventListener('change', () => {
+  showEllipsoids = ellipsoidEl.checked;
+  localStorage.setItem(ELLIPSOID_KEY, String(showEllipsoids));
+  toast(showEllipsoids ? 'σ ellipsoids on' : 'σ ellipsoids off');
 });
 document.getElementById('opt-clear-names').addEventListener('click', () => {
   const n = Object.keys(macNames).length;

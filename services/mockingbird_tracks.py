@@ -116,6 +116,168 @@ def codename_for(track_id: str) -> str:
     return f"{a} {b}·{suffix}"
 
 
+def _kf_state_looks_corrupt(state: list[float]) -> bool:
+    """Sanity check the Kalman state. Position should be within a few
+    tens of meters of any plausible room; velocity should be < ~5 m/s
+    (faster than walking pace). Numerical instability or a single very
+    bad measurement can push velocity to absurd values and then the
+    predict step blows up exponentially. When that happens, return True
+    and we'll re-initialize from the latest measurement."""
+    if any(not math.isfinite(s) for s in state):
+        return True
+    pos_max = 50.0     # any larger than this is definitely off-the-charts
+    vel_max = 5.0      # m/s
+    if any(abs(state[i]) > pos_max for i in (0, 1, 2)):
+        return True
+    if any(abs(state[i]) > vel_max for i in (3, 4, 5)):
+        return True
+    return False
+
+
+def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
+                meas_cov_3x3: list[list[float]] | None, now: float) -> tuple[float, float, float]:
+    """Constant-velocity Kalman filter step. State = [x,y,z,vx,vy,vz].
+
+    Predict: x_pred = F x_prev,  P_pred = F P F^T + Q
+       where F is the constant-velocity transition (Δt step on vel terms)
+       and Q is process noise (allows mild acceleration).
+    Update: combine prediction with the MLE measurement weighted by its
+       3×3 covariance (or a default if not supplied).
+
+    Returns the new position estimate (smoothed velocity available in state).
+    Operates on Track in-place — initializes state on first call.
+    """
+    # Default measurement covariance if MLE didn't give us one
+    R = meas_cov_3x3 or [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 0.5]]
+    # Clamp the covariance — sometimes Σ_p comes out tiny (overfit) or huge
+    # (poorly-conditioned geometry). 0.1m to 5m std-dev range.
+    R = _clamp_pos_cov(R, min_std=0.1, max_std=5.0)
+
+    # Re-initialize if the state has gone off the rails (corrupt from a
+    # past bad measurement) or jumped >5m from the new measurement
+    # (likely a teleport that shouldn't be smoothed).
+    if track.kf_state is not None:
+        s = track.kf_state
+        jump = math.sqrt((s[0] - measurement_xyz[0])**2 +
+                         (s[1] - measurement_xyz[1])**2 +
+                         (s[2] - measurement_xyz[2])**2)
+        if _kf_state_looks_corrupt(s) or jump > 5.0:
+            track.kf_state = None  # forces re-init below
+
+    # Initialize state on first call
+    if track.kf_state is None:
+        track.kf_state = list(measurement_xyz) + [0.0, 0.0, 0.0]
+        # Start with measurement covariance + generous velocity uncertainty
+        track.kf_cov = [
+            [R[0][0], R[0][1], R[0][2], 0, 0, 0],
+            [R[1][0], R[1][1], R[1][2], 0, 0, 0],
+            [R[2][0], R[2][1], R[2][2], 0, 0, 0],
+            [0, 0, 0, 1.0, 0, 0],
+            [0, 0, 0, 0, 1.0, 0],
+            [0, 0, 0, 0, 0, 1.0],
+        ]
+        track.kf_last_t = now
+        return measurement_xyz
+
+    dt = max(0.0, min(2.0, now - track.kf_last_t))  # clamp to [0, 2s]
+    track.kf_last_t = now
+
+    # F = block matrix [[I, dt*I], [0, I]]
+    # Predict state: x += v * dt
+    x = track.kf_state
+    x[0] += x[3] * dt; x[1] += x[4] * dt; x[2] += x[5] * dt
+
+    # Predict covariance: P = F P F^T + Q
+    # Q models process noise: small position noise + larger velocity noise
+    # so the filter doesn't get stuck if the device starts moving.
+    q_pos = 0.01 * dt    # 10 cm² noise per second
+    q_vel = 0.5 * dt     # half m²/s² noise per second (allows motion)
+    P = track.kf_cov
+    # Apply F·P·Fᵀ — work it out by hand for the constant-velocity block form:
+    # Pnew[i][j] for position-position = P[i][j] + dt*(P[i][j+3] + P[i+3][j]) + dt²*P[i+3][j+3]
+    # Pnew[i][j+3] for position-velocity = P[i][j+3] + dt*P[i+3][j+3]
+    # Pnew[i+3][j+3] for velocity-velocity = P[i+3][j+3]  (unchanged)
+    new_P = [row[:] for row in P]
+    for i in range(3):
+        for j in range(3):
+            new_P[i][j] = P[i][j] + dt * (P[i][j+3] + P[i+3][j]) + dt*dt * P[i+3][j+3]
+            new_P[i][j+3] = P[i][j+3] + dt * P[i+3][j+3]
+            new_P[i+3][j] = new_P[i][j+3]
+            # vel-vel block unchanged
+    # Add process noise to diagonals
+    new_P[0][0] += q_pos; new_P[1][1] += q_pos; new_P[2][2] += q_pos
+    new_P[3][3] += q_vel; new_P[4][4] += q_vel; new_P[5][5] += q_vel
+    P = new_P
+
+    # Update step. Measurement model H = [I, 0] (we measure position only)
+    # Innovation y = z - H x
+    z = measurement_xyz
+    y = [z[0] - x[0], z[1] - x[1], z[2] - x[2]]
+
+    # Innovation covariance S = H P H^T + R = P[0:3,0:3] + R
+    S = [[P[i][j] + R[i][j] for j in range(3)] for i in range(3)]
+    S_inv = _invert_3x3_local(S)
+    if S_inv is None:
+        return (x[0], x[1], x[2])
+
+    # Kalman gain K = P H^T S^-1 = P[:,0:3] S^-1   (6×3 matrix)
+    K = [[0.0]*3 for _ in range(6)]
+    for i in range(6):
+        for j in range(3):
+            for k in range(3):
+                K[i][j] += P[i][k] * S_inv[k][j]
+
+    # State update: x += K y
+    for i in range(6):
+        x[i] += K[i][0] * y[0] + K[i][1] * y[1] + K[i][2] * y[2]
+
+    # Covariance update: P = (I - K H) P
+    # (I - K H) has rows [identity - K], with H selecting first 3 cols
+    for i in range(6):
+        for j in range(6):
+            term = 0.0
+            for k in range(3):
+                term += K[i][k] * P[k][j]
+            P[i][j] -= term
+    track.kf_state = x
+    track.kf_cov = P
+    return (x[0], x[1], x[2])
+
+
+def _invert_3x3_local(M):
+    a, b, c = M[0]
+    d, e, f = M[1]
+    g, h, i = M[2]
+    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+    if abs(det) < 1e-12:
+        return None
+    inv = 1.0/det
+    return [
+        [(e*i - f*h)*inv, (c*h - b*i)*inv, (b*f - c*e)*inv],
+        [(f*g - d*i)*inv, (a*i - c*g)*inv, (c*d - a*f)*inv],
+        [(d*h - e*g)*inv, (b*g - a*h)*inv, (a*e - b*d)*inv],
+    ]
+
+
+def _clamp_pos_cov(C, min_std=0.1, max_std=5.0):
+    """Symmetrize and clamp the 3×3 covariance so it stays a sane PSD matrix.
+    Clamp diagonal to [min_std², max_std²]; clamp off-diagonal to keep
+    correlation magnitudes < 0.95."""
+    out = [row[:] for row in C]
+    for i in range(3):
+        out[i][i] = max(min_std * min_std, min(max_std * max_std, out[i][i]))
+    for i in range(3):
+        for j in range(i + 1, 3):
+            sij = out[i][j]
+            sji = out[j][i]
+            sym = 0.5 * (sij + sji)
+            # Limit |corr| < 0.95
+            limit = 0.95 * math.sqrt(out[i][i] * out[j][j])
+            sym = max(-limit, min(limit, sym))
+            out[i][j] = out[j][i] = sym
+    return out
+
+
 def codename_for_entity(entity_id: str) -> str:
     """Same scheme as codename_for() but applied to entities. Stable
     across MAC + track rotations because entity_id is the persistent ID."""
@@ -142,6 +304,12 @@ class Track:
     last_position: tuple[float, float, float] | None = None   # smoothed
     raw_position: tuple[float, float, float] | None = None    # latest unsmoothed
     last_trail_ts: float = 0.0
+    last_cov_3x3: list | None = None    # MLE position covariance (3×3 list)
+    last_rmse_m: float | None = None    # MLE residual RMS in meters
+    # Kalman state: [x, y, z, vx, vy, vz], 6×6 covariance
+    kf_state: list[float] | None = None
+    kf_cov: list[list[float]] | None = None
+    kf_last_t: float = 0.0
 
     @property
     def name(self) -> str:
@@ -366,19 +534,29 @@ class TrackStore:
 
                 # ---- track-level multilat using accumulated fingerprint ----
                 pos_method = d.get("pos_method", "centroid")
+                pos_cov = None
                 if calibration is not None and positions is not None:
-                    # Track fingerprint: {leaf: ewma_rssi}; rounded ints OK
                     track_fp = {leaf: int(round(r)) for leaf, r in track.fingerprint.items()
                                 if leaf in positions}
                     if len(track_fp) >= 4:
-                        # Lazy import to avoid circular dep
-                        from mockingbird_calibration import multilaterate
-                        res = multilaterate(track_fp, positions, calibration, bounds=multilat_bounds)
+                        # MLE multilat: per-leaf σ-weighted, returns covariance
+                        from mockingbird_calibration import mle_multilaterate
+                        res = mle_multilaterate(track_fp, positions, calibration,
+                                                bounds=multilat_bounds)
                         if res is not None:
-                            px, py, pz, _rmse = res
-                            # Pump through the smoother (replaces last_position EWMA)
-                            track.update(mac, {}, (px, py, pz), now)
-                            pos_method = "multilat-track"
+                            mle_pos = (res["x"], res["y"], res["z"])
+                            # Kalman temporal smoothing: physics-aware (constant
+                            # velocity model) combines our MLE measurement with
+                            # the predicted position from prior state, weighted
+                            # by their respective covariances. Net effect: a
+                            # stationary device stays put, a moving device's
+                            # velocity propagates between measurements.
+                            kf_pos = kalman_step(track, mle_pos, res["cov"], now)
+                            track.update(mac, {}, kf_pos, now)
+                            pos_method = "mle+kf"
+                            pos_cov = res["cov"]
+                            track.last_cov_3x3 = res["cov"]
+                            track.last_rmse_m = res["rmse_m"]
 
                 # Trail: only the LATEST point (one position per /api/live tick).
                 # Client accumulates a per-track trail buffer locally — eliminates
@@ -401,6 +579,9 @@ class TrackStore:
                     "track_leaves": len(track.fingerprint),
                     "trail": trail,
                     "pos_method": pos_method,
+                    # Position uncertainty for the 3D ellipsoid renderer
+                    "cov": track.last_cov_3x3,
+                    "rmse_m": track.last_rmse_m,
                 }
                 out.append(enriched)
             # ---- entity clustering pass ----
