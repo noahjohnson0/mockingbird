@@ -134,6 +134,44 @@ def _kf_state_looks_corrupt(state: list[float]) -> bool:
     return False
 
 
+# Zero-velocity detection ("ZUPT" from pedestrian dead-reckoning).
+# Without this, any per-tick RSSI jitter (which is real and ~5-10 dB even
+# for stationary devices) leaks into phantom velocity in the Kalman state.
+ZUPT_HISTORY_N = 4           # ~2 s of polls
+# ZUPT radius is ADAPTIVE based on the expected noise floor for that
+# track. We pass it in. Defaults to 0.7 m which is roughly 1σ for a
+# typical per-track MLE estimate in this room.
+
+def _is_stationary(positions: list, radius_m: float = 0.7) -> bool:
+    if len(positions) < ZUPT_HISTORY_N:
+        return False
+    pts = positions[-ZUPT_HISTORY_N:]
+    cx = sum(p.x for p in pts) / len(pts)
+    cy = sum(p.y for p in pts) / len(pts)
+    cz = sum(p.z for p in pts) / len(pts)
+    r2 = radius_m * radius_m
+    for p in pts:
+        if (p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2 > r2:
+            return False
+    return True
+
+
+def _is_stationary_tuples(positions: list, radius_m: float = 0.4) -> bool:
+    """Same as _is_stationary but accepts a list of (x, y, z) tuples
+    instead of TrailPoint objects."""
+    if len(positions) < ZUPT_HISTORY_N:
+        return False
+    pts = positions[-ZUPT_HISTORY_N:]
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    cz = sum(p[2] for p in pts) / len(pts)
+    r2 = radius_m * radius_m
+    for p in pts:
+        if (p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2 > r2:
+            return False
+    return True
+
+
 def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
                 meas_cov_3x3: list[list[float]] | None, now: float) -> tuple[float, float, float]:
     """Constant-velocity Kalman filter step. State = [x,y,z,vx,vy,vz].
@@ -190,8 +228,14 @@ def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
     # Predict covariance: P = F P F^T + Q
     # Q models process noise: small position noise + larger velocity noise
     # so the filter doesn't get stuck if the device starts moving.
-    q_pos = 0.01 * dt    # 10 cm² noise per second
-    q_vel = 0.5 * dt     # half m²/s² noise per second (allows motion)
+    # Process noise tuning: a stationary phone's RSSI jitter produces
+    # ~30-80cm of MLE position noise from one tick to the next. With
+    # high q_vel the Kalman concludes the phone is moving at ~1m/s
+    # and we get spurious velocity arrows on stationary devices.
+    # Drop q_vel so the filter REQUIRES sustained motion to update
+    # the velocity state — single-sample noise gets smoothed away.
+    q_pos = 0.005 * dt   # 5 cm² noise per second on position
+    q_vel = 0.04 * dt    # 4 cm²/s² noise per second on velocity (tight)
     P = track.kf_cov
     # Apply F·P·Fᵀ — work it out by hand for the constant-velocity block form:
     # Pnew[i][j] for position-position = P[i][j] + dt*(P[i][j+3] + P[i+3][j]) + dt²*P[i+3][j+3]
@@ -239,6 +283,27 @@ def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
             for k in range(3):
                 term += K[i][k] * P[k][j]
             P[i][j] -= term
+    # ZUPT: adaptive radius scaled from this track's measured covariance.
+    if track.last_cov_3x3 is not None:
+        track_sigma = math.sqrt(max(0.01, sum(track.last_cov_3x3[i][i] for i in range(3)) / 3))
+        zupt_r = min(1.2, max(0.3, 1.5 * track_sigma))
+    else:
+        zupt_r = 0.7
+    zupt_triggered = _is_stationary(list(track.trail), radius_m=zupt_r)
+    if zupt_triggered:
+        x[3] = x[4] = x[5] = 0.0
+        for i in range(3, 6):
+            for j in range(6):
+                P[i][j] *= 0.1
+                P[j][i] = P[i][j]
+            P[i][i] = 0.01
+    # Velocity magnitude clamp: even without ZUPT, if the filter's
+    # velocity estimate is below the UI's "real motion" threshold
+    # (20 cm/s), clamp to zero. The threshold matches the client's
+    # arrow-display threshold so we never report jitter as motion.
+    v_mag = math.sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5])
+    if v_mag < 0.20:
+        x[3] = x[4] = x[5] = 0.0
     track.kf_state = x
     track.kf_cov = P
     return (x[0], x[1], x[2])
@@ -378,6 +443,7 @@ class Entity:
     last_position: tuple[float, float, float] | None = None
     last_cov_3x3: list | None = None    # Fused covariance after information-form averaging
     n_tracks_used: int = 0              # How many members contributed to the fused measurement
+    pos_history: deque = field(default_factory=lambda: deque(maxlen=8))
     # Entity-level Kalman state (separate from per-track filters): when
     # all N member tracks see the SAME physical device, their MLE
     # measurements are independent-ish observations of one location and
@@ -428,8 +494,12 @@ def _entity_kalman_step(ent: Entity, measurement_xyz: tuple[float, float, float]
     x = ent.kf_state
     x[0] += x[3] * dt; x[1] += x[4] * dt; x[2] += x[5] * dt
 
-    q_pos = 0.005 * dt
-    q_vel = 0.3 * dt
+    # Entity-level process noise tuning. Entities are fused from N
+    # tracks so their measurements are tighter — the filter should
+    # trust those even more (lower process noise = "stay where you
+    # are unless lots of evidence says otherwise").
+    q_pos = 0.003 * dt
+    q_vel = 0.02 * dt    # very tight — entities only show velocity for sustained motion
     P = ent.kf_cov
     new_P = [row[:] for row in P]
     for i in range(3):
@@ -461,6 +531,11 @@ def _entity_kalman_step(ent: Entity, measurement_xyz: tuple[float, float, float]
             for k in range(3):
                 term += K[i][k] * P[k][j]
             P[i][j] -= term
+    # Velocity magnitude clamp at entity level: same threshold as
+    # per-track. Stops phantom drift on stationary entities cold.
+    v_mag = math.sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5])
+    if v_mag < 0.20:
+        x[3] = x[4] = x[5] = 0.0
     ent.kf_state = x
     ent.kf_cov = P
     return (x[0], x[1], x[2])
@@ -632,6 +707,21 @@ class TrackStore:
             # Kalman fusion against history
             smoothed = _entity_kalman_step(ent, tuple(mu), Sf, now)
             ent.last_position = smoothed
+            # Record this position in history for ZUPT detection
+            ent.pos_history.append(smoothed)
+            # Adaptive ZUPT radius based on entity's actual σ (much tighter
+            # than per-track because fusion shrinks σ to ~√N less).
+            entity_sigma = math.sqrt(max(0.001, sum(Sf[i][i] for i in range(3)) / 3))
+            zupt_r = max(0.15, 2.0 * entity_sigma)  # 2σ band
+            if _is_stationary_tuples(list(ent.pos_history), radius_m=zupt_r):
+                if ent.kf_state is not None:
+                    ent.kf_state[3] = ent.kf_state[4] = ent.kf_state[5] = 0.0
+                    if ent.kf_cov is not None:
+                        for i in range(3, 6):
+                            for j in range(6):
+                                ent.kf_cov[i][j] *= 0.1
+                                ent.kf_cov[j][i] = ent.kf_cov[i][j]
+                            ent.kf_cov[i][i] = 0.01
 
 
     def step(self, devices: Iterable[dict], now: float | None = None,
