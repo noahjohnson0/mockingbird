@@ -380,7 +380,13 @@ class TrackStore:
                             track.update(mac, {}, (px, py, pz), now)
                             pos_method = "multilat-track"
 
-                trail = [{"ts": p.ts, "x": p.x, "y": p.y, "z": p.z} for p in track.trail]
+                # Trail: only the LATEST point (one position per /api/live tick).
+                # Client accumulates a per-track trail buffer locally — eliminates
+                # ~200 KB of redundant trail-history JSON per response (91% of
+                # payload bytes). Old style: send 80-point trail each tick.
+                trail = ([{"ts": track.trail[-1].ts, "x": track.trail[-1].x,
+                           "y": track.trail[-1].y, "z": track.trail[-1].z}]
+                         if track.trail else [])
                 smoothed = track.last_position
                 enriched = {
                     **d,
