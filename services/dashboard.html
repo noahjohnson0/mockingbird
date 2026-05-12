@@ -1129,6 +1129,19 @@ function updateTrailGeometry(entry, trail, color) {
   entry.trailGeom.computeBoundingSphere();
 }
 
+// Per-track trail history accumulated CLIENT-SIDE. Server used to send
+// the full 40s trail every poll (~200 KB JSON, ~91% of payload, ~1-2 s
+// serialization stall on Pi Zero W). Now it sends just the latest point
+// per tick and we maintain the buffer here.
+const CLIENT_TRAIL_CAP = 80;       // ~40 s of history at 500 ms poll
+function pushTrailPoint(entry, d) {
+  if (!entry.clientTrail) entry.clientTrail = [];
+  entry.clientTrail.push({ x: d.x, y: d.y, z: d.z });
+  if (entry.clientTrail.length > CLIENT_TRAIL_CAP) {
+    entry.clientTrail.splice(0, entry.clientTrail.length - CLIENT_TRAIL_CAP);
+  }
+}
+
 function applyLiveDevices(devices) {
   const now = performance.now();
   for (const d of devices) {
@@ -1141,7 +1154,8 @@ function applyLiveDevices(devices) {
     entry.labelEl.textContent = deviceLabelText(d, d.rssi_max);
     entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
     styleLabelForKey(entry.labelEl, d.track_id);
-    updateTrailGeometry(entry, d.trail, entry.color);
+    pushTrailPoint(entry, d);
+    updateTrailGeometry(entry, entry.clientTrail, entry.color);
   }
 }
 
