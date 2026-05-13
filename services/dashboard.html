@@ -330,17 +330,36 @@
   }
   .leaf-stat-row:last-child { border-bottom: 0; }
   .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
+  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
+  /* Status indicator — shape AND color so colorblind operators (and
+     anyone at 2 a.m.) can read it. ● circle = OK, ▲ triangle = STALE,
+     ■ square = OFFLINE. clip-path gives crisp geometry at small sizes
+     where a unicode glyph would render fuzzy. */
+  .leaf-stat-row .status-dot {
+    width: 10px; height: 10px; flex-shrink: 0;
+    background: #22c55e;
+    border-radius: 50%;  /* default = circle (OK) */
+  }
+  .leaf-stat-row.is-stale .status-dot {
+    background: #f59e0b;
+    border-radius: 0;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);  /* triangle */
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .leaf-stat-row.is-offline .status-dot {
+    background: #ef4444;
+    border-radius: 1px;
+    clip-path: none;  /* square */
+    animation: pulse 1.0s ease-in-out infinite;
+  }
+  /* OK rows also get a thin green left border so the column has three
+     unique non-color signals (shape, border presence, word) on top of
+     the three colors. */
+  .leaf-stat-row.is-ok { border-left: 2px solid #22c55e; padding-left: 2px; }
   .leaf-stat-row .stale { color: #f59e0b; }
   .leaf-stat-row .ok    { color: #22c55e; }
   .leaf-stat-row .err   { color: #ef4444; }
-  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
-  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
-  .leaf-stat-row .status-dot {
-    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-    background: #22c55e;
-  }
-  .leaf-stat-row.is-stale   .status-dot { background: #f59e0b; animation: pulse 1.4s ease-in-out infinite; }
-  .leaf-stat-row.is-offline .status-dot { background: #ef4444; animation: pulse 1.0s ease-in-out infinite; }
   .leaf-stat-head {
     color: #6b7280; font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.06em; padding: 4px;
@@ -2465,14 +2484,20 @@ async function pollStats() {
         `${L.hb_age_s.toFixed(0)}s ago`;
       const ageCls = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
       const row = document.createElement('div');
-      row.className = 'leaf-stat-row' + (status === 'offline' ? ' is-offline' :
-                                         status === 'stale'   ? ' is-stale'   : '');
-      // Wide label for offline rows so user can spot them
-      const tag = status === 'offline' ? '<span class="err" style="font-size:9px; text-transform:uppercase">OFFLINE</span>' :
-                  status === 'stale'   ? '<span class="stale" style="font-size:9px; text-transform:uppercase">STALE</span>' : '';
+      row.className = 'leaf-stat-row ' + (status === 'offline' ? 'is-offline' :
+                                          status === 'stale'   ? 'is-stale'   :
+                                                                 'is-ok');
+      // Status word is shown on EVERY row (not just stale/offline) so the
+      // column reads uniformly — and so OK isn't signaled by color alone.
+      const tagCls   = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
+      const tagLabel = status === 'offline' ? 'OFFLINE' : status === 'stale' ? 'STALE' : 'OK';
+      const tag = `<span class="${tagCls}" style="font-size:9px; text-transform:uppercase; font-weight:600">${tagLabel}</span>`;
+      // aria-label on the dot so screen-readers get the status; the shape
+      // (circle/triangle/square via clip-path) gives the same info visually
+      // to colorblind operators.
       row.innerHTML = `
         <div class="lname">
-          <span class="status-dot"></span>
+          <span class="status-dot" role="img" aria-label="${tagLabel.toLowerCase()}"></span>
           <span>${L.leaf.replace('mockingbird-', '')}</span>
         </div>
         <div>
