@@ -91,6 +91,7 @@ struct Msg {
     char     mac[18];     // "AA:BB:CC:DD:EE:FF\0"
     int8_t   rssi;
     uint8_t  addr_type;
+    uint8_t  ch;          // primary advertising channel index: 37/38/39, or 0 = unknown
     char     name[24];    // truncated/sanitized
     char     manuf[33];   // hex of first 16 mfg-data bytes + NUL
     uint32_t t_ms;
@@ -118,6 +119,37 @@ class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
         m.rssi      = (int8_t)d->getRSSI();
         m.addr_type = d->getAddressType();
         m.t_ms      = millis();
+
+        // Primary advertising channel index (37/38/39).
+        //
+        // RF context: a BLE advertiser cycles its ADV_IND PDU across the three
+        // primary channels (2402/2426/2480 MHz). Per-channel RSSI bias is a
+        // real physical effect — antenna gain, package/PCB reflections, and
+        // WiFi co-channel interference all differ at those three frequencies.
+        // Capturing this per-observation lets calibration cancel it out
+        // downstream (Vlad's P0 physical effect; tracked separately —
+        // PURU-2 ships the plumbing only, math comes in a follow-up).
+        //
+        // NimBLE-Arduino 1.4.2 caveat: the legacy onResult() callback path
+        // does NOT plumb the primary channel through. `ble_gap_disc_desc`
+        // (host/include/host/ble_gap.h) has no channel field, and the host
+        // discards the controller's channel hint before invoking us. The
+        // HCI LE Advertising Report event itself per Core spec carries no
+        // channel index — only the Extended Advertising Report does, and
+        // ESP32 (classic, non-S3) controller support for ext-adv reports is
+        // patchy.
+        //
+        // For now we stamp 0 = "unknown" so the schema and downstream
+        // collector/DB are wired up. Two real-source options for the
+        // follow-up ticket:
+        //   1) Patch NimBLE host (ble_hs_hci_evt.c) to stash the controller's
+        //      channel hint into the disc_desc, then add a getter on
+        //      NimBLEAdvertisedDevice. ~30 LOC, but it's a vendored patch.
+        //   2) Move scanning to ESP-IDF host/nimble directly and hook the
+        //      raw HCI event — cleaner separation of concerns.
+        // Either way, only this assignment changes; the wire format and
+        // collector are stable.
+        m.ch = 0;
 
         if (d->haveName()) {
             const std::string &raw = d->getName();
@@ -213,9 +245,11 @@ static void uplink_task(void * /*pv*/) {
             int n = snprintf(
                 line, sizeof(line),
                 "{\"event\":\"obs\",\"mac\":\"%s\",\"rssi\":%d,\"addr_type\":%u,"
+                "\"ch\":%u,"
                 "\"name\":\"%s\",\"manuf\":\"%s\",\"t_ms\":%lu,"
                 "\"location\":\"%s\"}\n",
                 m.mac, m.rssi, (unsigned)m.addr_type,
+                (unsigned)m.ch,
                 m.name, m.manuf, (unsigned long)m.t_ms,
                 g_location);
 
