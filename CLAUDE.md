@@ -135,16 +135,23 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 - Model: **Raspberry Pi Zero W Rev 1.1** (BCM2835, single-core ARMv6 @ 1 GHz,
   512 MB RAM, 2.4 GHz WiFi only — which is why `mockingbird` is on 2.4 GHz)
 - **NOT** a Zero 2 W — confirmed via `cat /proc/cpuinfo`
-- OS: Raspberry Pi OS Lite **armhf** Bookworm `6.12.75-1+rpt1` (2026-03-11
-  build, freshly flashed)
+- OS: **Raspbian GNU/Linux 13 (trixie)** armhf, kernel
+  `6.12.75+rpt-rpi-v6 #1 Raspbian 1:6.12.75-1+rpt1 (2026-03-11)`. Ships
+  OpenSSH `10.0p2 Raspbian-7+deb13u2` (so the SSH banner is *not*
+  Bookworm-shaped — useful for fingerprinting which host is actually
+  the Pi when probing the subnet). WiFi MAC is the canonical Pi
+  Foundation OUI `b8:27:eb:*` — locally-administered MACs on this
+  subnet are NOT the Pi.
 - SD card: 64 GB (originally read-only because of a stuck write-protect on
   the SD adapter — **the lock switch is now super-glued to the unlocked
   position**, so reflashing always works now)
 - Hostname: `raspberrypi` on the LAN, `mockingbird-pi` on the tailnet
 - LAN: `wlan0` on Mockingbird, `192.168.8.202/24` (DHCP — may renumber) <!-- VERIFY: Macca to either reserve DHCP lease on the Opal for the Pi's MAC, or move leaves to mDNS hostname `mockingbird-pi.local`; then change this to "static reservation" -->
-- **Tailscale**: `mockingbird-pi` at `100.83.26.55` (IPv4) /
-  `fd7a:115c:a1e0::5838:1a37` (IPv6) <!-- VERIFY: Macca to confirm tailnet IPs still match and stamp a "last verified YYYY-MM-DD" -->. Advertises `192.168.8.0/24`, route
-  approved at the control plane. IP forwarding live
+- **Tailscale**: `mockingbird-pi` at `100.73.232.63` (IPv4) /
+  `fd7a:115c:a1e0::4d38:e83f` (IPv6) — *verified 2026-05-13 after Pi
+  reflash to Trixie; the older `100.83.26.55` from the Bookworm install
+  is gone*. Advertises `192.168.8.0/24`, route approved at the control
+  plane (approval is sticky across reflashes). IP forwarding live
   (`net.ipv4.ip_forward=1`, persisted in `/etc/sysctl.d/99-tailscale.conf`).
 - Reach paths (preferred → fallback):
   1. Tailscale (works from anywhere): `ssh pi@mockingbird-pi`
@@ -284,6 +291,24 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 
 ## Gotchas learned (the hard way)
 
+- **Pi Zero W on Bookworm/Trixie can silently lose WiFi and stay dead
+  until power-cycled.** Symptom: tailscale control plane shows the Pi
+  `offline, last seen Xh ago`, LAN ARP entry goes "incomplete," ESP32
+  leaves on the same Mockingbird WiFi keep working fine (so it's not
+  the AP). systemd-side `tailscaled` is `active+enabled` so when WiFi
+  comes back it would reconnect — except it doesn't, the wlan0 driver
+  appears wedged. Fix: unplug-replug. Operational followup that's not
+  yet done: a watchdog cron on the Pi that pings the Opal every minute
+  and `nmcli connection up Mockingbird` if it fails N times. Filed as
+  a P1 against Macca.
+- **Pi tailscale subnet route advertisement is lost across reflashes.**
+  Even when the route was previously approved at the control plane
+  (approval IS sticky), the local `AdvertiseRoutes` pref needs to be
+  re-set on the new install. Symptom: `tailscale status --json` shows
+  the Pi's `Self.AllowedIPs` containing only its own /32 (no
+  `192.168.8.0/24`), and `Self.PrimaryRoutes` is null. Fix:
+  `sudo tailscale set --advertise-routes=192.168.8.0/24` on the Pi.
+  The control plane re-approves automatically; takes seconds.
 - **Windows tailscale gets stuck in `NoState` without a logged-in user**
   unless you set `--unattended`. The `Tailscale` Windows service runs
   fine, `tailscaled.exe` is alive, but `tailscale status` returns
