@@ -54,6 +54,13 @@ static const char *FW_VERSION = MOCKINGBIRD_FW_VERSION;
 #ifndef MOCKINGBIRD_COLLECTOR_PORT
 #define MOCKINGBIRD_COLLECTOR_PORT 9001
 #endif
+#ifndef MOCKINGBIRD_COLLECTOR_MDNS_HOST
+// Bare hostname (no .local) — avahi on the Pi publishes "mockingbird-pi.local".
+#define MOCKINGBIRD_COLLECTOR_MDNS_HOST "mockingbird-pi"
+#endif
+#ifndef MOCKINGBIRD_MDNS_TIMEOUT_MS
+#define MOCKINGBIRD_MDNS_TIMEOUT_MS 5000
+#endif
 
 static String deviceHostname() {
     uint8_t mac[6];
@@ -181,11 +188,58 @@ class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
 
 static WiFiClient g_tcp;
 
+// Cached collector IP. Resolved via mDNS query for MOCKINGBIRD_COLLECTOR_MDNS_HOST
+// at first connect; falls back to the compile-time MOCKINGBIRD_COLLECTOR_HOST on
+// failure. Invalidated on any connect/short-write failure so we re-resolve and
+// pick up a Pi that DHCP-flipped its lease.
+static IPAddress g_collector_ip((uint32_t)0);
+static char      g_collector_src[8] = "none";  // "mdns" or "static"
+
+static void invalidate_collector_ip() {
+    g_collector_ip = IPAddress((uint32_t)0);
+    g_collector_src[0] = 'n'; g_collector_src[1] = 'o';
+    g_collector_src[2] = 'n'; g_collector_src[3] = 'e';
+    g_collector_src[4] = 0;
+}
+
+static bool resolve_collector() {
+    // Try mDNS first. ESP32's MDNS.queryHost() blocks up to `timeout_ms` and
+    // returns INADDR_NONE (0.0.0.0) on failure. 5 s is generous; avahi on
+    // the Pi typically responds in <100 ms once the leaf is on the AP.
+    IPAddress ip = MDNS.queryHost(MOCKINGBIRD_COLLECTOR_MDNS_HOST,
+                                  MOCKINGBIRD_MDNS_TIMEOUT_MS);
+    if (ip != IPAddress((uint32_t)0)) {
+        g_collector_ip = ip;
+        strcpy(g_collector_src, "mdns");
+        Serial.printf("[uplink] mDNS resolved %s.local -> %s\n",
+                      MOCKINGBIRD_COLLECTOR_MDNS_HOST, ip.toString().c_str());
+        return true;
+    }
+    // Fallback: parse the compile-time literal.
+    if (g_collector_ip.fromString(MOCKINGBIRD_COLLECTOR_HOST)) {
+        strcpy(g_collector_src, "static");
+        Serial.printf("[uplink] mDNS miss; falling back to static %s\n",
+                      MOCKINGBIRD_COLLECTOR_HOST);
+        return true;
+    }
+    Serial.printf("[uplink] could not resolve collector (mDNS+static both failed)\n");
+    return false;
+}
+
 static bool uplink_connect() {
     if (g_tcp.connected()) return true;
-    Serial.printf("[uplink] connecting to %s:%d...\n",
-                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
-    if (!g_tcp.connect(MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT, 5000)) {
+    if (g_collector_ip == IPAddress((uint32_t)0)) {
+        if (!resolve_collector()) {
+            g_up = false;
+            return false;
+        }
+    }
+    Serial.printf("[uplink] connecting to %s:%d (via %s)...\n",
+                  g_collector_ip.toString().c_str(),
+                  MOCKINGBIRD_COLLECTOR_PORT, g_collector_src);
+    if (!g_tcp.connect(g_collector_ip, MOCKINGBIRD_COLLECTOR_PORT, 5000)) {
+        // The cached IP is dead — drop it so the next attempt re-resolves.
+        invalidate_collector_ip();
         g_up = false;
         return false;
     }
@@ -265,6 +319,8 @@ static void uplink_task(void * /*pv*/) {
                 g_n_dropped++;
                 Serial.printf("[uplink] short write %d/%d — reconnect\n", wrote, n);
                 g_tcp.stop();
+                // Peer may have moved (DHCP flip on the Pi). Force re-resolve.
+                invalidate_collector_ip();
             }
         }
 
@@ -289,12 +345,15 @@ static void uplink_task(void * /*pv*/) {
 
 static void handleStatus() {
     char body[560];
+    String hostStr = (g_collector_ip == IPAddress((uint32_t)0))
+                       ? String(MOCKINGBIRD_COLLECTOR_HOST)
+                       : g_collector_ip.toString();
     snprintf(body, sizeof(body),
              "{\"hostname\":\"%s\",\"version\":\"%s\",\"location\":\"%s\","
              "\"uptime_s\":%lu,\"rssi\":%d,\"free_heap\":%u,"
              "\"ip\":\"%s\",\"mac\":\"%s\","
              "\"uplink\":{\"connected\":%s,\"sent\":%lu,\"dropped\":%lu,"
-             "\"q_depth\":%d,\"host\":\"%s:%d\"}}",
+             "\"q_depth\":%d,\"host\":\"%s:%d\",\"host_src\":\"%s\"}}",
              deviceHostname().c_str(), FW_VERSION, g_location,
              (unsigned long)(millis() / 1000UL),
              WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
@@ -303,7 +362,8 @@ static void handleStatus() {
              g_up ? "true" : "false",
              (unsigned long)g_n_sent, (unsigned long)g_n_dropped,
              (int)uxQueueMessagesWaiting(g_q),
-             MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+             hostStr.c_str(), MOCKINGBIRD_COLLECTOR_PORT,
+             g_collector_src);
     server.send(200, "application/json", body);
 }
 
@@ -472,8 +532,11 @@ void setup() {
     server.on("/location", HTTP_GET,  handleLocationGet);
     server.on("/location", HTTP_POST, handleLocationPost);
     server.begin();
-    Serial.printf("[http] :80 ready; streaming to %s:%d\n",
-                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+    Serial.printf("[http] :80 ready; will stream to %s.local:%d "
+                  "(fallback %s)\n",
+                  MOCKINGBIRD_COLLECTOR_MDNS_HOST,
+                  MOCKINGBIRD_COLLECTOR_PORT,
+                  MOCKINGBIRD_COLLECTOR_HOST);
 }
 
 void loop() {
