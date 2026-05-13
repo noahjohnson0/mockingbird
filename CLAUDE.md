@@ -168,23 +168,44 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
   path. PlatformIO (`pio`) is installed and used by `~/repos/esp32_demo`.
 
 ### `svr` — Noah's gaming PC (GPU compute resource)
-Tailnet-reachable Windows desktop with an **RTX 4070**. Reach via `ssh
-noah@svr` (tailnet hostname; no LAN path needed since it's not on
-Mockingbird). The 4070 is mockingbird's heavy-compute pool for anything
-the Pi Zero W cannot stomach:
+Windows desktop, **RTX 4070 (12 GB VRAM)**, hostname `svr` on tailnet
+(`100.82.67.47`), LAN IP on entropy at `192.168.0.117`. SSH user is
+`noahj`; default shell is PowerShell (use `;` not `&&` for compound
+commands). OpenSSH Server is enabled and firewalled-allowed inbound.
+
+Reach paths (preferred → fallback):
+1. `ssh noahj@svr` (via tailnet hostname; MagicDNS resolves `svr` →
+   `100.82.67.47`). Works from anywhere on the tailnet — Mac on
+   Mockingbird, Mac on entropy, phone over LTE, etc. NAT-traversal is
+   reliable; direct UDP path from Mockingbird measures ~12 ms.
+2. `ssh noahj@192.168.0.117` (direct LAN, only when Mac is on
+   entropy-5G — same subnet as svr).
+3. `ssh noahj@svr.local` (mDNS, only on the entropy subnet).
+
+Use cases:
 - **GPU-bound ML training** — fingerprinting model training, BLE-RSSI →
-  motion classifier training, any future audio/MEMS classifier work
-  (12 GB VRAM, sufficient for most non-LLM workloads we'd reasonably do)
+  motion classifier training, future audio/MEMS classifier work.
 - **Batch EDA on large DB snapshots** — pull `observations.sqlite` to
-  `svr`, run Wanjiru's `scripts/eda/` against it without thrashing the
-  Pi. Pandas + numpy with no resource ceiling
-- **Firmware builds at speed** — `pio` cross-compiles instantly here vs.
-  minutes on the Pi
-- **Anything embarrassingly parallel** — synthetic-data Monte Carlo for
-  Eszter's MLE bias studies, parameter sweeps on tuning knobs
-<!-- VERIFY: Noah to confirm tailnet hostname is exactly `svr`, the SSH username, and whether Linux is dual-boot / WSL2 / pure Windows + OpenSSH. Document the chosen toolchain (Python version, CUDA version) once verified. -->
-Treat as ephemeral compute, not durable storage — anything we care about
-keeping lives on the Pi or in the repo.
+  `svr`, run `scripts/eda/` against it without thrashing the Pi.
+- **Firmware builds at speed** — `pio` cross-compiles instantly vs.
+  minutes on the Pi.
+- **Embarrassingly parallel** — Monte Carlo for Eszter's MLE bias
+  studies, parameter sweeps.
+
+Tailscale hygiene (fixed 2026-05-13 — see Gotchas):
+- Service `Tailscale` is **StartType: Automatic** and `--unattended` is
+  set, so the daemon comes up and authenticates **without a logged-in
+  user session**. Survives reboot and logout.
+- Windows Firewall has Tailscale-Process + Tailscale-In inbound Allow
+  rules (auto-installed by the Tailscale MSI).
+- `tailscale ping svr` from the Mac on Mockingbird returns ~12 ms via
+  direct UDP (NAT-traversed through the Opal).
+
+Treat as ephemeral compute, not durable storage — anything we care
+about keeping lives on the Pi or in the repo. `lemon-squeezer` (the
+local-LLM benchmark project at `~/repos/lemon-squeezer`) uses svr via
+`OLLAMA_API_BASE=http://svr:11434` and `SAMPLER_SSH_TARGET=noahj@svr`
+in `~/.config/lemon-squeezer.env` — also tailnet-name addressing.
 
 ## Credentials & secrets
 
@@ -263,6 +284,15 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 
 ## Gotchas learned (the hard way)
 
+- **Windows tailscale gets stuck in `NoState` without a logged-in user**
+  unless you set `--unattended`. The `Tailscale` Windows service runs
+  fine, `tailscaled.exe` is alive, but `tailscale status` returns
+  `unexpected state: NoState` and health says "Tailscale is starting.
+  Please wait." indefinitely. Fix once per machine: SSH in, run
+  `tailscale up --unattended`. The pref persists across reboots. Without
+  it, the daemon needs an active GUI session (i.e., someone actually
+  logged into the desktop) to authenticate — fine for a workstation,
+  useless for a headless GPU box. This bit svr — see its section above.
 - **macOS doesn't speak RNDIS.** USB gadget mode `g_ether` defaults to
   RNDIS on modern Raspberry Pi OS kernels and macOS won't bind a network
   interface. Use `g_cdc` (CDC ECM + ACM composite) instead. Even then,
