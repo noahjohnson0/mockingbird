@@ -97,6 +97,15 @@
   }
   .tab:hover { color: #cdd1d7; }
   .tab.active { color: #79c4ff; border-bottom-color: #1d6fef; }
+  /* Visible focus for keyboard nav (WCAG 2.4.7). The default :focus
+     outline inside a flex tablist gets clipped by the bottom border, so
+     use an inset box-shadow that's safe inside the row. */
+  .tab:focus { outline: none; }
+  .tab:focus-visible {
+    color: #fff;
+    box-shadow: inset 0 0 0 2px #1d6fef;
+    border-radius: 2px;
+  }
   .tab .pulse {
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: #22c55e; margin-left: 6px; vertical-align: middle;
@@ -358,13 +367,13 @@
   </div>
 </div>
 <div id="side">
-  <div class="tabs">
-    <div class="tab active" data-tab="setup">Setup</div>
-    <div class="tab" data-tab="live">Live<span class="pulse" style="display:none" id="live-pulse"></span></div>
-    <div class="tab" data-tab="stats">Stats</div>
+  <div class="tabs" role="tablist" aria-label="Dashboard sections">
+    <div class="tab active" data-tab="setup" role="tab" id="tab-setup"  aria-controls="setup-pane" aria-selected="true"  tabindex="0">Setup</div>
+    <div class="tab"        data-tab="live"  role="tab" id="tab-live"   aria-controls="live-pane"  aria-selected="false" tabindex="-1">Live<span class="pulse" style="display:none" id="live-pulse" aria-hidden="true"></span></div>
+    <div class="tab"        data-tab="stats" role="tab" id="tab-stats"  aria-controls="stats-pane" aria-selected="false" tabindex="-1">Stats</div>
   </div>
 
-<div class="pane active" id="setup-pane">
+<div class="pane active" id="setup-pane" role="tabpanel" aria-labelledby="tab-setup" tabindex="0">
   <h1>mockingbird · room</h1>
   <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
 
@@ -502,7 +511,7 @@
   </div>
 </div><!-- /setup-pane -->
 
-<div class="pane" id="live-pane">
+<div class="pane" id="live-pane" role="tabpanel" aria-labelledby="tab-live" tabindex="0" hidden>
   <h1>live · device tracking</h1>
   <div class="sub">Apple-fingerprint devices seen by ≥2 positioned leaves in the last 8 s, weighted-centroid positioned. Refreshes 2×/sec.</div>
 
@@ -546,7 +555,7 @@
   </div>
 </div><!-- /live-pane -->
 
-<div class="pane" id="stats-pane">
+<div class="pane" id="stats-pane" role="tabpanel" aria-labelledby="tab-stats" tabindex="0" hidden>
   <h1>system stats</h1>
   <div class="sub">Pi health + per-leaf streaming state. Refreshes every 3 s.</div>
 
@@ -2286,9 +2295,20 @@ async function pollLive() {
   }
 }
 
-function setTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === name + '-pane'));
+function setTab(name, { focus = false } = {}) {
+  document.querySelectorAll('.tab').forEach(t => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    t.setAttribute('tabindex', on ? '0' : '-1');
+    if (on && focus) t.focus();
+  });
+  document.querySelectorAll('.pane').forEach(p => {
+    const on = p.id === name + '-pane';
+    p.classList.toggle('active', on);
+    // hidden attribute + aria stays in sync with .active so AT and CSS agree.
+    if (on) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+  });
   if (name === 'live') {
     livePulse.style.display = 'inline-block';
     if (!_liveFirstPollDone) {
@@ -2408,8 +2428,29 @@ async function pollStats() {
     console.error('pollStats', e);
   }
 }
-document.querySelectorAll('.tab').forEach(t => {
+// Tabs are keyboard-navigable per the WAI-ARIA tabs pattern:
+//   ←/→ : move focus + activate prev/next tab
+//   Home/End : move to first/last
+//   Enter/Space : activate the focused tab (also handled by click)
+// We use "activate-on-focus" because the panes are cheap to swap and an
+// operator skimming with arrow keys benefits from seeing each tab's content.
+const _tabEls = Array.from(document.querySelectorAll('.tab'));
+_tabEls.forEach((t, i) => {
   t.addEventListener('click', () => setTab(t.dataset.tab));
+  t.addEventListener('keydown', (ev) => {
+    let nextIdx = null;
+    switch (ev.key) {
+      case 'ArrowRight': nextIdx = (i + 1) % _tabEls.length; break;
+      case 'ArrowLeft':  nextIdx = (i - 1 + _tabEls.length) % _tabEls.length; break;
+      case 'Home':       nextIdx = 0; break;
+      case 'End':        nextIdx = _tabEls.length - 1; break;
+      case 'Enter':
+      case ' ':          setTab(t.dataset.tab); ev.preventDefault(); return;
+      default: return;
+    }
+    ev.preventDefault();
+    setTab(_tabEls[nextIdx].dataset.tab, { focus: true });
+  });
 });
 
 // ---- path-loss calibration ----
