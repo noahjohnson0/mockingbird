@@ -469,13 +469,26 @@ def _linear_fit(xs: list[float], ys: list[float]) -> tuple[float | None, float |
 
 
 def estimate_distance(rssi: int, params: CalibrationParams, leaf: str | None = None) -> float:
-    """Invert the log-distance model: d = 10^((P0 - rssi)/(10n)).
-    Uses per-leaf parameters when available; falls back to global."""
+    """Invert the log-distance model: d = 10^((P0 - rssi_unbiased)/(10n)).
+
+    Model: rssi_measured = P0 - 10 n log10(d) + rx_bias_leaf + noise.
+    A leaf with rx_bias = -6 reports 6 dB COLDER than a reference leaf at
+    the same distance, so to invert we first remove that offset:
+        rssi_unbiased = rssi_measured - rx_bias_leaf
+    THEN invert the path-loss equation. Subtract-before-invert is required;
+    applying the bias inside the exponent (i.e. baking it into P0) is
+    algebraically equivalent only when there is no per-leaf P0/n override,
+    so we do it explicitly here to keep the semantics correct in all paths.
+
+    Uses per-leaf (P0, n) when available; falls back to global.
+    """
     if leaf is not None and leaf in params.per_leaf:
         p0, n, _sigma = params.per_leaf[leaf]
     else:
         p0, n = params.p0, params.n
-    return 10.0 ** ((p0 - rssi) / (10.0 * n))
+    rx_b = params.rx_bias.get(leaf, 0.0) if (leaf is not None and params.rx_bias) else 0.0
+    rssi_unbiased = rssi - rx_b
+    return 10.0 ** ((p0 - rssi_unbiased) / (10.0 * n))
 
 
 def mle_multilaterate(rssi_per_leaf: dict[str, int],
