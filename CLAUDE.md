@@ -162,10 +162,29 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 - Tailscale: installed and authenticated. Now sees `mockingbird-pi` as a peer
   with `192.168.8.0/24` subnet route. Mac is currently on Mockingbird so it
   reaches `192.168.8.x` directly via LAN, not through the tailnet route —
-  the route is for OTHER tailnet peers (phone, Windows server, etc.).
+  the route is for OTHER tailnet peers (phone, Windows server, `svr`, etc.).
 - `gh` authenticated as `noahjohnson0` (active) and `hopeharbor0`
 - ESP-IDF: **not installed** — would need it for the ESP32-S3 firmware
   path. PlatformIO (`pio`) is installed and used by `~/repos/esp32_demo`.
+
+### `svr` — Noah's gaming PC (GPU compute resource)
+Tailnet-reachable Windows desktop with an **RTX 4070**. Reach via `ssh
+noah@svr` (tailnet hostname; no LAN path needed since it's not on
+Mockingbird). The 4070 is mockingbird's heavy-compute pool for anything
+the Pi Zero W cannot stomach:
+- **GPU-bound ML training** — fingerprinting model training, BLE-RSSI →
+  motion classifier training, any future audio/MEMS classifier work
+  (12 GB VRAM, sufficient for most non-LLM workloads we'd reasonably do)
+- **Batch EDA on large DB snapshots** — pull `observations.sqlite` to
+  `svr`, run Wanjiru's `scripts/eda/` against it without thrashing the
+  Pi. Pandas + numpy with no resource ceiling
+- **Firmware builds at speed** — `pio` cross-compiles instantly here vs.
+  minutes on the Pi
+- **Anything embarrassingly parallel** — synthetic-data Monte Carlo for
+  Eszter's MLE bias studies, parameter sweeps on tuning knobs
+<!-- VERIFY: Noah to confirm tailnet hostname is exactly `svr`, the SSH username, and whether Linux is dual-boot / WSL2 / pure Windows + OpenSSH. Document the chosen toolchain (Python version, CUDA version) once verified. -->
+Treat as ephemeral compute, not durable storage — anything we care about
+keeping lives on the Pi or in the repo.
 
 ## Credentials & secrets
 
