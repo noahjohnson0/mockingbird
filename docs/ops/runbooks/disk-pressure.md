@@ -102,13 +102,24 @@ sudo touch /tmp/test && sudo touch /home/pi/test    # second one will fail if FS
 
 If RO due to errors: **the card is dying**. Do not try to recover in place. Pull the card, image it on the Mac (`dd if=/dev/diskN of=mockingbird-pi-card.img bs=4M`), then flash a fresh card from the most recent backup. See "SD card swap procedure" in the project memory (TODO: write it).
 
-## 5. Retention strategy recommendation
+## 5. Retention strategy
 
-Right now we keep everything forever and rely on the 64 GB card buying us a year. That's lazy, and it means we don't notice growth until it hurts. Recommend:
+### Shipped (MAC-2, 2026-05-13)
+
+- **Hard cap on journald: `SystemMaxUse=500M`** — drop-in at
+  `/etc/systemd/journald.conf.d/mockingbird.conf`. Source of truth in repo:
+  `services/journald-mockingbird.conf`. Install on the Pi with:
+
+  ```sh
+  ssh pi@mockingbird-pi 'sudo sh -s' < scripts/install-journald-cap.sh
+  ```
+
+  Rollback: `sudo rm /etc/systemd/journald.conf.d/mockingbird.conf && sudo systemctl restart systemd-journald`.
+
+### Still TODO
 
 - **Daily housekeeping cron (`/etc/cron.daily/mockingbird-housekeeping`)**: `DELETE FROM obs WHERE ts < strftime('%s','now','-90 days')` followed by an incremental vacuum (`PRAGMA incremental_vacuum(...)` — set `PRAGMA auto_vacuum=INCREMENTAL` on the DB first; this is a one-time migration: stop service, set pragma, run `VACUUM` once, restart).
 - **Weekly rollup**: aggregate older-than-7-days `obs` into a downsampled `obs_5min` table (mac, leaf, 5-min bucket, count, rssi_min/max/avg). Wanjiru's analytics work fine on this; we'd save ~95% of the rows for long-term trends.
-- **Hard cap on journald**: `/etc/systemd/journald.conf` → `SystemMaxUse=500M`. Do this now — it costs nothing.
 - **Alert thresholds**: warn at 70% (`/`), page at 85%. With 4 GB/month growth that's ~3 months of "you have time to act" before any actual outage. Compare to the current "you find out when the DB write fails" experience.
 
 ## 6. After
