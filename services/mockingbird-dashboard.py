@@ -155,7 +155,9 @@ def estimate_leaf_position(db: sqlite3.Connection, leaf_id: str,
 
     # 1. Devices this leaf sees recently
     target_rows = db.execute(
-        "SELECT mac, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+        # leaf= is strongly selective (1 of ~8); seek the per-leaf range
+        # instead of range-scanning idx_obs_ts and post-filtering.
+        "SELECT mac, MAX(rssi) FROM obs INDEXED BY idx_obs_leaf_ts "
         "WHERE ts >= ? AND leaf = ? GROUP BY mac",
         (now - ESTIMATE_WINDOW_S, leaf_id),
     ).fetchall()

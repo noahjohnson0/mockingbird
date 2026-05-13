@@ -125,7 +125,9 @@ def _harvest_calibration_points(db: sqlite3.Connection,
         if ts_end <= ts_start:
             continue
         leaf_obs = db.execute(
-            "SELECT leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+            # single mac is highly selective — idx_obs_mac_ts seeks
+            # straight to the mac's range vs scanning the whole window.
+            "SELECT leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_mac_ts "
             "WHERE ts >= ? AND ts <= ? AND mac = ? GROUP BY leaf",
             (ts_start, ts_end, mac),
         ).fetchall()
@@ -201,7 +203,9 @@ def fit_pathloss(db: sqlite3.Connection,
     leaf_names = list(positions.keys())
     placeholders = ",".join("?" * len(leaf_names))
     rows = db.execute(
-        f"SELECT mac, leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_ts "
+        # leaf IN (~8 leaves) — per-leaf range via idx_obs_leaf_ts beats
+        # full idx_obs_ts scan + post-filter.
+        f"SELECT mac, leaf, MAX(rssi) FROM obs INDEXED BY idx_obs_leaf_ts "
         f"WHERE ts >= ? AND leaf IN ({placeholders}) GROUP BY mac, leaf",
         (now - window_s, *leaf_names),
     ).fetchall()
@@ -337,7 +341,9 @@ def _fit_leaf_biases(db, positions, fallback_p0, fallback_n, per_leaf,
             continue
         # For each receiver leaf, mean RSSI of obs of this mac in window
         rx_rows = db.execute(
-            "SELECT leaf, AVG(rssi), COUNT(*) FROM obs INDEXED BY idx_obs_leaf_ts "
+            # single mac is far more selective than any leaf set;
+            # idx_obs_mac_ts seeks the mac's range directly.
+            "SELECT leaf, AVG(rssi), COUNT(*) FROM obs INDEXED BY idx_obs_mac_ts "
             "WHERE mac = ? AND ts >= ? AND ts <= ? GROUP BY leaf",
             (mac, ts_s, ts_e),
         ).fetchall()
@@ -422,7 +428,9 @@ def _fit_per_leaf_models(db, positions, now, fallback_p0, fallback_n,
                 continue
             # All obs of this MAC at this receiver leaf in the anchor's window
             rssi_row = db.execute(
-                "SELECT AVG(rssi), COUNT(*) FROM obs INDEXED BY idx_obs_leaf_ts "
+                # mac is ~1-of-many-thousands; idx_obs_mac_ts is the
+                # tightest seek even with the leaf= further filter.
+                "SELECT AVG(rssi), COUNT(*) FROM obs INDEXED BY idx_obs_mac_ts "
                 "WHERE leaf = ? AND mac = ? AND ts >= ? AND ts <= ?",
                 (receiver_leaf, mac, ts_s, ts_e),
             ).fetchone()
