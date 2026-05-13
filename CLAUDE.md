@@ -360,6 +360,15 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
   Use `tailscale up` to interactively obtain the URL, then once authed,
   apply route advertisements with `tailscale set --advertise-routes=...`
   in a follow-up call — `set` is non-interactive and survives SSH churn.
+- **Pi Zero W (BCM43430) wlan0 silently wedges with PS=on (default).** The
+  brcmfmac driver's firmware-default power-save state is reachable bug
+  surface on firmware `7.45.98 (TOB)`. Symptom: link stays "UP" from the
+  kernel's POV but no packets move and nothing self-heals. Fixed via
+  multi-layer mitigation (NM `wifi.powersave=2`, `brcmfmac` module
+  options, a userspace watchdog timer, and persistent journal). RCA:
+  [`docs/ops/rca/2026-05-13-pi-wlan0-wedge.md`](docs/ops/rca/2026-05-13-pi-wlan0-wedge.md).
+  Deploy: `bash scripts/deploy-pi-wlan-fix.sh`. Configs live under
+  `services/pi/`.
 - **`busybox` lacks `install`, `base64`, `od`.** Use `cp + chmod`, pipe to
   `python3` on the Mac, and `hexdump` respectively.
 
