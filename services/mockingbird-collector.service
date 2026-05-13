@@ -2,6 +2,10 @@
 Description=Mockingbird BLE observation collector
 After=network-online.target
 Wants=network-online.target
+# Crash-loop guard: if the unit restarts more than 10 times in 120s, give up
+# and surface as failed rather than hammering systemd silently forever.
+StartLimitBurst=10
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
@@ -10,9 +14,17 @@ Restart=always
 RestartSec=3
 User=pi
 Group=pi
+# Graceful shutdown: SIGINT lets asyncio.run() unwind and the SQLite WAL
+# checkpoint cleanly. SIGTERM (the systemd default) would yank the process
+# mid-INSERT. 10s is plenty for the small in-flight buffers we hold.
+KillSignal=SIGINT
+TimeoutStopSec=10
 # Reasonable resource caps for a Pi Zero W (512 MB RAM).
 MemoryHigh=128M
 MemoryMax=192M
+# Collector is the most important thing on the box — if the kernel OOM-kills
+# something, it should not be this. Pair with +500 on the dashboard.
+OOMScoreAdjust=-500
 StandardOutput=journal
 StandardError=journal
 

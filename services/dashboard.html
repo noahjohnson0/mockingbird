@@ -20,6 +20,13 @@
   h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; color: #fff; }
   .sub { color: #6b7280; font-size: 12px; margin-bottom: 12px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin: 16px 0 6px; }
+  details > summary.cal-summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 16px 0 6px; user-select: none; }
+  details > summary.cal-summary::-webkit-details-marker { display: none; }
+  details > summary.cal-summary::before { content: '▸'; color: #6b7280; font-size: 10px; transition: transform 0.15s; display: inline-block; }
+  details[open] > summary.cal-summary::before { transform: rotate(90deg); }
+  details > summary.cal-summary:focus-visible { outline: 2px solid #79c4ff; outline-offset: 2px; border-radius: 3px; }
+  .cal-summary-state { font-size: 10px; color: #6b7280; text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: auto; }
+  .cal-summary-state.ok { color: #22c55e; }
   .leaf {
     background: #1c1f24; border-radius: 6px; padding: 10px; margin-bottom: 8px;
     border: 1px solid #232730;
@@ -83,12 +90,332 @@
     background: #1c1f24; padding: 1px 6px; border-radius: 3px;
     font-family: ui-monospace; font-size: 10px; color: #cdd1d7;
   }
+  /* tabs */
+  .tabs {
+    display: flex; gap: 0; margin: -16px -16px 14px;
+    background: #0c0d10; border-bottom: 1px solid #1f2227;
+  }
+  .tab {
+    flex: 1; padding: 12px 0; text-align: center; cursor: pointer;
+    font-size: 12px; color: #6b7280; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-bottom: 2px solid transparent;
+    transition: color 120ms, border-color 120ms;
+  }
+  .tab:hover { color: #cdd1d7; }
+  .tab.active { color: #79c4ff; border-bottom-color: #1d6fef; }
+  /* Visible focus for keyboard nav (WCAG 2.4.7). The default :focus
+     outline inside a flex tablist gets clipped by the bottom border, so
+     use an inset box-shadow that's safe inside the row. */
+  .tab:focus { outline: none; }
+  .tab:focus-visible {
+    color: #fff;
+    box-shadow: inset 0 0 0 2px #1d6fef;
+    border-radius: 2px;
+  }
+  .tab .pulse {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: #22c55e; margin-left: 6px; vertical-align: middle;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.45; transform: scale(0.7); }
+  }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  /* live pane */
+  .live-summary {
+    background: #1c1f24; border-radius: 6px; padding: 12px;
+    border: 1px solid #232730; margin-bottom: 10px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .live-count { font-size: 28px; font-weight: 700; color: #79c4ff; font-family: ui-monospace, monospace; }
+  .live-count-label { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .live-asof { color: #6b7280; font-size: 11px; margin-left: auto; font-family: ui-monospace, monospace; }
+  /* Freshness states for the as-of clock. fresh = quiet grey; warming
+     amber once we cross the expected poll interval; red once the data
+     is clearly stale (> ~10s). Operator gets a visual signal *before*
+     they're staring at numbers that haven't moved. */
+  .live-asof.warm { color: #f59e0b; }
+  .live-asof.stale { color: #ef4444; font-weight: 600; }
+  /* Connection-lost banner: takes over the as-of badge when /api/live
+     has failed N consecutive times. Pulses so it draws the eye even in
+     peripheral vision; says exactly what's wrong, no jargon. */
+  .live-conn-lost {
+    margin-left: auto; padding: 3px 8px; border-radius: 3px;
+    background: #5a0e0e; color: #fff; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    font-family: ui-monospace, monospace;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .dev-row {
+    background: #1c1f24; border-radius: 4px; padding: 8px 10px;
+    margin-bottom: 4px; border: 1px solid #232730;
+    display: flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, "SF Mono", monospace; font-size: 11px;
+  }
+  .dev-row .dev-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dev-row .dev-mac { color: #cdd1d7; flex: 1; }
+  .dev-row .dev-rssi { color: #79c4ff; }
+  .dev-row .dev-n { color: #6b7280; }
+  .dev-row.stale { opacity: 0.4; }
+  .live-note {
+    color: #6b7280; font-size: 11px; line-height: 1.5;
+    padding: 10px; background: #14181f; border-radius: 4px;
+    border-left: 2px solid #f59e0b;
+  }
+  /* live pane: name editor */
+  .dev-row input.dev-name {
+    background: transparent; border: 0; color: #e6e9ef;
+    font-family: inherit; font-size: 12px; padding: 1px 4px;
+    flex: 1; min-width: 0; outline: none;
+    border-bottom: 1px dashed transparent;
+    border-radius: 0;
+  }
+  .dev-row input.dev-name:hover  { border-bottom-color: #2a2e36; }
+  .dev-row input.dev-name:focus  { border-bottom-color: #1d6fef; color: #79c4ff; }
+  .dev-row.named input.dev-name  { color: #79c4ff; font-weight: 600; }
+  .dev-row.named { background: #1a2230; border-color: #2a3a55; }
+  /* live-pane toolbar (toggles row) */
+  .live-toolbar {
+    display: flex; gap: 12px; align-items: center;
+    padding: 8px 10px; margin-bottom: 8px;
+    background: #14181f; border: 1px solid #232730; border-radius: 6px;
+    font-size: 11px; color: #cdd1d7;
+  }
+  .live-toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .live-toolbar input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 14px; height: 14px; border: 1px solid #2a2e36; border-radius: 3px;
+    background: #0c0d10; cursor: pointer; position: relative; flex-shrink: 0;
+  }
+  .live-toolbar input[type="checkbox"]:checked { background: #1d6fef; border-color: #1d6fef; }
+  .live-toolbar input[type="checkbox"]:checked::after {
+    content: '✓'; position: absolute; left: 1px; top: -3px;
+    color: white; font-size: 11px; font-weight: 700;
+  }
+  .live-toolbar .spacer { flex: 1; }
+  .live-toolbar button {
+    margin: 0; padding: 3px 8px; font-size: 10px;
+    background: transparent; color: #6b7280; border: 1px solid #2a2e36;
+  }
+  .live-toolbar button:hover { background: #1c1f24; color: #cdd1d7; }
+  /* scene loading overlay — visible from first paint, fades out
+     once Three.js has rendered its first frame and data has arrived */
+  #scene-loader {
+    position: absolute; inset: 0; display: flex;
+    flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none; background: #0c0d10;
+    transition: opacity 320ms ease-out;
+    z-index: 5;
+  }
+  #scene-loader.hidden { opacity: 0; }
+  #scene-loader.gone   { display: none; }
+  .spinner {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 3px solid #1f2227; border-top-color: #1d6fef;
+    animation: spin 800ms linear infinite;
+  }
+  .spinner.sm { width: 22px; height: 22px; border-width: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #scene-loader .stage {
+    margin-top: 14px; color: #6b7280; font-size: 12px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    letter-spacing: 0.04em;
+  }
+  /* small spinner pinned to top-right of the scene for ongoing refetches */
+  #scene-busy {
+    position: absolute; top: 12px; right: 12px;
+    opacity: 0; transition: opacity 180ms ease-out;
+    z-index: 4; pointer-events: none;
+  }
+  #scene-busy.visible { opacity: 0.75; }
+  /* live-pane spinner state */
+  .live-loader {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; padding: 24px 0; gap: 10px;
+    color: #6b7280; font-size: 12px;
+  }
+  /* fade-in for first piece of data */
+  @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+  .fadein { animation: fadein 240ms ease-out; }
+  #scene { position: relative; }
+  /* leaf stats + estimate panels in the side panel */
+  .leaf-stats {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 10px; color: #6b7280; margin-top: 4px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .leaf-stats .stat-bar {
+    flex: 1; height: 4px; background: #14181f; border-radius: 2px;
+    overflow: hidden; position: relative; min-width: 50px;
+  }
+  .leaf-stats .stat-bar::after {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, #1d6fef, #79c4ff);
+    width: var(--strength, 0%); border-radius: 2px;
+    transition: width 300ms ease-out;
+  }
+  .leaf-estimate {
+    background: #1a2230; border: 1px dashed #3a4a6a; border-radius: 4px;
+    padding: 8px; margin-top: 8px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px;
+  }
+  .leaf-estimate .est-coords {
+    font-family: ui-monospace, "SF Mono", monospace; color: #79c4ff;
+    flex: 1;
+  }
+  .leaf-estimate .est-meta { color: #6b7280; font-size: 10px; }
+  .leaf-estimate button.use-est {
+    margin: 0; padding: 4px 8px; font-size: 11px;
+    background: #1d6fef; color: white;
+  }
+  /* view controls overlay in scene area */
+  #view-controls {
+    position: absolute; top: 12px; left: 12px; z-index: 4;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #view-controls .vc-row { display: flex; gap: 4px; }
+  #view-controls button {
+    background: rgba(20,22,26,0.85); border: 1px solid #2a2e36;
+    color: #cdd1d7; font-size: 11px; padding: 4px 10px;
+    margin: 0; cursor: pointer; min-width: 38px;
+    font-family: inherit;
+  }
+  #view-controls button:hover { background: rgba(28,31,36,0.95); color: #fff; }
+  #view-controls button.active { background: #1d6fef; color: white; border-color: #1d6fef; }
+  #view-controls .vc-label {
+    font-size: 9px; color: #6b7280; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-top: 6px; padding-left: 2px;
+  }
+  /* view cube widget — clickable 3D cube in the corner */
+  #view-cube {
+    position: absolute; top: 14px; right: 14px;
+    width: 110px; height: 110px; z-index: 4;
+    cursor: grab; border-radius: 6px;
+    background: rgba(20,22,26,0.45);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border: 1px solid rgba(42,46,54,0.6);
+  }
+  #view-cube:active { cursor: grabbing; }
+  #view-cube canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
+  /* stats pane */
+  .stat-card {
+    background: #14181f; border: 1px solid #232730; border-radius: 6px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .stat-card h3 {
+    margin: 0 0 8px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #6b7280; font-weight: 600;
+  }
+  .stat-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px;
+    font-size: 11px;
+  }
+  .stat-grid > div > .k { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-grid > div > .v {
+    color: #e6e9ef; font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 13px; margin-top: 2px;
+  }
+  .stat-bar-fill {
+    height: 4px; border-radius: 2px; background: #1d6fef;
+    transition: width 240ms ease-out;
+  }
+  .stat-bar-fill.warn { background: #f59e0b; }
+  .stat-bar-fill.err  { background: #ef4444; }
+  .stat-bar-bg {
+    height: 4px; background: #0c0d10; border-radius: 2px;
+    margin-top: 3px; overflow: hidden;
+  }
+  .leaf-stat-row {
+    display: grid;
+    grid-template-columns: 110px 1fr 1fr 1fr; gap: 8px; align-items: center;
+    padding: 6px 4px; border-bottom: 1px solid #1f2227;
+    font-size: 11px; font-family: ui-monospace, "SF Mono", monospace;
+  }
+  .leaf-stat-row:last-child { border-bottom: 0; }
+  .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
+  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
+  /* Status indicator — shape AND color so colorblind operators (and
+     anyone at 2 a.m.) can read it. ● circle = OK, ▲ triangle = STALE,
+     ■ square = OFFLINE. clip-path gives crisp geometry at small sizes
+     where a unicode glyph would render fuzzy. */
+  .leaf-stat-row .status-dot {
+    width: 10px; height: 10px; flex-shrink: 0;
+    background: #22c55e;
+    border-radius: 50%;  /* default = circle (OK) */
+  }
+  .leaf-stat-row.is-stale .status-dot {
+    background: #f59e0b;
+    border-radius: 0;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);  /* triangle */
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .leaf-stat-row.is-offline .status-dot {
+    background: #ef4444;
+    border-radius: 1px;
+    clip-path: none;  /* square */
+    animation: pulse 1.0s ease-in-out infinite;
+  }
+  /* OK rows also get a thin green left border so the column has three
+     unique non-color signals (shape, border presence, word) on top of
+     the three colors. */
+  .leaf-stat-row.is-ok { border-left: 2px solid #22c55e; padding-left: 2px; }
+  .leaf-stat-row .stale { color: #f59e0b; }
+  .leaf-stat-row .ok    { color: #22c55e; }
+  .leaf-stat-row .err   { color: #ef4444; }
+  .leaf-stat-head {
+    color: #6b7280; font-size: 9px; text-transform: uppercase;
+    letter-spacing: 0.06em; padding: 4px;
+    display: grid; grid-template-columns: 110px 1fr 1fr 1fr; gap: 8px;
+  }
 </style>
 </head>
 <body>
 <div id="toast-host"></div>
-<div id="scene"></div>
+<div id="scene">
+  <!-- Visible from very first paint, before Three.js loads. JS hides
+       this once the scene has rendered its first frame + leaves are in. -->
+  <div id="scene-loader">
+    <div class="spinner"></div>
+    <div class="stage" id="scene-loader-stage">loading 3D engine…</div>
+  </div>
+  <div id="scene-busy" style="top:auto; bottom:12px; right:12px"><div class="spinner sm"></div></div>
+  <div id="view-controls">
+    <div class="vc-label">camera</div>
+    <div class="vc-row">
+      <button data-cam="persp" class="active" title="Perspective camera">3D</button>
+      <button data-cam="ortho" title="Orthographic camera (no perspective foreshortening)">ortho</button>
+    </div>
+    <div class="vc-label">quick view</div>
+    <div class="vc-row">
+      <button data-view="iso" title="Isometric">iso</button>
+    </div>
+  </div>
+  <div id="view-cube" title="Click a face to snap that view. Drag to orbit."></div>
+  <div id="focus-badge" style="
+    position: absolute; bottom: 14px; left: 14px;
+    background: rgba(20,22,26,0.92); padding: 8px 12px;
+    border-radius: 6px; border: 1px solid #2a2e36;
+    font-size: 11px; color: #cdd1d7; z-index: 4;
+    display: none; max-width: 280px;
+  ">
+    <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em">focused</div>
+    <div id="focus-name" style="font-weight: 600; margin-top: 2px">—</div>
+    <div id="focus-meta" style="font-size: 10px; color: #6b7280; margin-top: 2px">click empty space to clear</div>
+  </div>
+</div>
 <div id="side">
+  <div class="tabs" role="tablist" aria-label="Dashboard sections">
+    <div class="tab active" data-tab="setup" role="tab" id="tab-setup"  aria-controls="setup-pane" aria-selected="true"  tabindex="0">Setup</div>
+    <div class="tab"        data-tab="live"  role="tab" id="tab-live"   aria-controls="live-pane"  aria-selected="false" tabindex="-1">Live<span class="pulse" style="display:none" id="live-pulse" aria-hidden="true"></span></div>
+    <div class="tab"        data-tab="stats" role="tab" id="tab-stats"  aria-controls="stats-pane" aria-selected="false" tabindex="-1">Stats</div>
+  </div>
+
+<div class="pane active" id="setup-pane" role="tabpanel" aria-labelledby="tab-setup" tabindex="0">
   <h1>mockingbird · room</h1>
   <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
 
@@ -104,8 +431,88 @@
       north (°clockwise from +y / room "depth" axis)
     </div>
     <input type="number" step="1" id="room-north" placeholder="0" style="margin-top:4px; width:80px">
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px; cursor:pointer; font-size:11px; color:#cdd1d7">
+      <input type="checkbox" id="room-ground-floor" style="appearance:none; width:14px; height:14px; border:1px solid #2a2e36; border-radius:3px; background:#0c0d10; cursor:pointer; position:relative;">
+      <span>ground floor — nothing below me</span>
+    </label>
+    <style>
+      #room-ground-floor:checked { background:#1d6fef !important; border-color:#1d6fef !important; }
+      #room-ground-floor:checked::after { content:'✓'; position:absolute; left:1px; top:-3px; color:white; font-size:11px; font-weight:700; }
+    </style>
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
   </div>
+
+  <details id="cal-details" open>
+    <summary class="cal-summary"><h2 style="display:inline; margin:0">path-loss calibration</h2><span id="cal-summary-state" class="cal-summary-state"></span></summary>
+  <div class="leaf" id="cal-panel">
+    <div class="leaf-status" id="cal-status">not calibrated yet — positions use weighted centroid</div>
+    <div id="cal-params" style="display:none; font-family: ui-monospace, monospace; font-size: 11px; color: #79c4ff; margin-top: 6px;"></div>
+    <button id="cal-run" style="margin-top: 8px">refit from live data (bootstrap)</button>
+    <div class="leaf-status" style="font-size: 10px; margin-top: 6px; color: #6b7280">
+      With ≥3 calibration anchor points the fit uses those as ground truth
+      (preferred). Otherwise falls back to bootstrap-from-current-centroids.
+    </div>
+
+    <h2 style="margin-top: 14px">calibration anchors</h2>
+    <div class="leaf-status" style="font-size: 11px; color: #cdd1d7">
+      Put a known device (e.g. your phone) at a known spot, then capture.
+      The system records RSSI at every leaf for 20 s and ties them to the
+      known position.
+    </div>
+    <div class="row" style="grid-template-columns: 1fr; margin-top: 8px">
+      <div>
+        <div class="leaf-status">reference device (from Live tab)</div>
+        <select id="cal-track-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
+      </div>
+    </div>
+    <div style="display:flex; gap: 6px; margin-top: 4px">
+      <button id="ad-start" class="ghost" style="font-size: 11px; flex: 1">auto-detect (click between leaves)</button>
+      <button id="ad-voice-start" style="font-size: 11px; flex: 1">🔊 voice-guided (hands-free)</button>
+    </div>
+
+    <div id="ad-wizard" style="display:none; margin-top: 10px; padding: 10px; background: #14181f; border: 1px dashed #3a4a6a; border-radius: 6px">
+      <!-- Voice-guided large display -->
+      <div id="ad-voice-panel" style="display:none; text-align: center; margin-bottom: 12px">
+        <div id="ad-big-countdown" style="font-size: 72px; font-weight: 700; color: #79c4ff; font-family: ui-monospace, monospace; line-height: 1">—</div>
+        <div id="ad-phase" style="font-size: 13px; color: #cdd1d7; margin-top: 4px">ready</div>
+        <div id="ad-subtitle" style="font-size: 11px; color: #6b7280; margin-top: 8px; font-style: italic; min-height: 30px"></div>
+        <div id="ad-dots" style="font-size: 18px; letter-spacing: 0.3em; color: #2a2e36; margin-top: 6px"></div>
+      </div>
+      <!-- Manual mode -->
+      <div id="ad-manual-panel">
+        <div id="ad-step-text" style="font-size: 12px; color: #cdd1d7; margin-bottom: 8px"></div>
+        <select id="ad-leaf-pick" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px"></select>
+        <div style="display:flex; gap:6px; margin-top: 8px; align-items: center">
+          <button id="ad-go" style="margin: 0">place phone, then click Go (10 s)</button>
+          <span id="ad-progress" style="color: #79c4ff; font-family: ui-monospace, monospace; font-size: 11px"></span>
+        </div>
+      </div>
+      <div style="text-align: right; margin-top: 8px">
+        <button id="ad-cancel" class="ghost" style="margin: 0; padding: 4px 8px; font-size: 10px">cancel</button>
+      </div>
+      <div id="ad-visits" style="font-size: 10px; color: #6b7280; margin-top: 8px; font-family: ui-monospace, monospace"></div>
+      <div id="ad-results" style="margin-top: 8px"></div>
+    </div>
+    <div class="row" style="grid-template-columns: 1fr; margin-top: 8px">
+      <div>
+        <div class="leaf-status">at position (drop to leaf, or enter coords)</div>
+        <select id="cal-leaf-select" style="width:100%; background:#0c0d10; color:#e6e9ef; border:1px solid #2a2e36; padding:5px; border-radius:4px; font-family: inherit; font-size: 12px">
+          <option value="">— pick a leaf —</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top: 6px">
+      <input type="number" step="0.01" id="cal-x" placeholder="x">
+      <input type="number" step="0.01" id="cal-y" placeholder="y">
+      <input type="number" step="0.01" id="cal-z" placeholder="z">
+    </div>
+    <input type="text" id="cal-label" placeholder="label (optional, e.g. 'at desk leaf')" style="margin-top:6px">
+    <button id="cal-capture" style="margin-top: 8px">capture 20 s here</button>
+    <div id="cal-capture-status" style="font-size: 11px; color: #6b7280; margin-top: 6px"></div>
+
+    <div id="cal-anchor-list" style="margin-top: 10px"></div>
+  </div>
+  </details>
 
   <h2>leaves</h2>
   <div id="leaves">
@@ -143,8 +550,85 @@
   <div class="legend">
     <kbd>drag</kbd> rotate · <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> pan<br>
     Refresh every 5 s. Updates persist to <code>leaf_position</code> in SQLite.<br>
-    <span style="color:#fbbf24">●</span> origin marker · grid = 1 m squares
+    <span style="color:#fbbf24">●</span> origin · ◆ leaves (rotating diamonds) · ● devices (Live tab)<br>
+    grid = 1 m squares
   </div>
+</div><!-- /setup-pane -->
+
+<div class="pane" id="live-pane" role="tabpanel" aria-labelledby="tab-live" tabindex="0" hidden>
+  <h1>live · device tracking</h1>
+  <div class="sub">Apple-fingerprint devices seen by ≥2 positioned leaves in the last 8 s, weighted-centroid positioned. Refreshes 2×/sec.</div>
+
+  <div class="live-summary">
+    <div class="live-count" id="live-count">·</div>
+    <div class="live-count-label">devices<br>in view</div>
+    <div style="text-align:center; font-size:10px; color:#6b7280; flex:1">
+      <div id="live-method" style="color:#79c4ff; font-family: ui-monospace, monospace; font-size:11px">centroid</div>
+      <div id="live-method-detail" style="margin-top:2px">positioning mode</div>
+    </div>
+    <div class="live-asof" id="live-asof">—</div>
+  </div>
+
+  <div class="live-toolbar">
+    <label title="Show floating labels next to every leaf diamond and device sphere in 3D. Names are auto-assigned per track; override via sidebar inputs.">
+      <input type="checkbox" id="opt-show-all-labels">
+      Labels
+    </label>
+    <label title="Show 1σ uncertainty ellipsoids around each MLE-positioned device. The ellipsoid shape shows which axes the system is more/less certain about.">
+      <input type="checkbox" id="opt-show-ellipsoids">
+      σ ellipsoids
+    </label>
+    <div class="spacer"></div>
+    <button id="opt-clear-names" title="Drop all manual overrides so devices revert to their auto-assigned names">reset names</button>
+  </div>
+
+  <h2>entities <span style="font-size:10px; color:#6b7280; text-transform:none; letter-spacing:0; font-weight:400">— clusters of co-located devices, tightest σ</span></h2>
+  <div id="live-entity-list">
+    <div class="empty" style="font-size:11px">no multi-track entities yet</div>
+  </div>
+
+  <h2 style="margin-top: 14px">devices</h2>
+  <div id="live-list">
+    <div class="empty">switch to Live to start polling…</div>
+  </div>
+
+  <div class="live-note" style="margin-top:14px">
+    <strong>Note on Apple MAC rotation:</strong> phones/watches/AirPods rotate their advertised
+    BLE address every ~15 min. A dot that vanishes and a new one nearby is usually rotation,
+    not movement. Future work: cluster MACs by RSSI fingerprint similarity.
+  </div>
+</div><!-- /live-pane -->
+
+<div class="pane" id="stats-pane" role="tabpanel" aria-labelledby="tab-stats" tabindex="0" hidden>
+  <h1>system stats</h1>
+  <div class="sub">Pi health + per-leaf streaming state. Refreshes every 3 s.</div>
+
+  <div class="stat-card">
+    <h3>raspberry pi</h3>
+    <div class="stat-grid" id="pi-grid">
+      <div><div class="k">load avg</div><div class="v" id="pi-load">—</div></div>
+      <div><div class="k">uptime</div><div class="v" id="pi-uptime">—</div></div>
+      <div><div class="k">memory</div><div class="v" id="pi-mem">—</div><div class="stat-bar-bg"><div class="stat-bar-fill" id="pi-mem-bar" style="width:0%"></div></div></div>
+      <div><div class="k">disk</div><div class="v" id="pi-disk">—</div><div class="stat-bar-bg"><div class="stat-bar-fill" id="pi-disk-bar" style="width:0%"></div></div></div>
+      <div><div class="k">obs.sqlite</div><div class="v" id="pi-db">—</div></div>
+      <div><div class="k">total obs rate</div><div class="v" id="pi-obs-rate">—</div></div>
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <h3>leaves</h3>
+    <div class="leaf-stat-head">
+      <div>leaf</div>
+      <div>uptime · hb age</div>
+      <div>obs/s · sent · drop</div>
+      <div>wifi · heap · q</div>
+    </div>
+    <div id="leaf-stats">
+      <div class="empty" style="padding: 12px 0; color:#6b7280; font-style:italic">switch to Stats to start polling…</div>
+    </div>
+  </div>
+</div><!-- /stats-pane -->
+
 </div>
 
 <script type="importmap">
@@ -157,6 +641,39 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+// ---- scene loader stages ----
+// The loader DOM is in the HTML so it paints instantly. We advance the
+// stage text as work happens, then hide once we've rendered ≥1 frame
+// AND the first /api/leaves response has arrived.
+const loaderEl = document.getElementById('scene-loader');
+const loaderStageEl = document.getElementById('scene-loader-stage');
+const sceneBusyEl = document.getElementById('scene-busy');
+let _firstFrameDrawn = false;
+let _firstLeavesIn = false;
+function setLoaderStage(text) { loaderStageEl.textContent = text; }
+function maybeDismissLoader() {
+  if (_firstFrameDrawn && _firstLeavesIn) {
+    loaderEl.classList.add('hidden');
+    setTimeout(() => loaderEl.classList.add('gone'), 360);
+  }
+}
+// Safety net: never block the page on the loader for more than 6 s.
+// If Three.js or the CDN is slow/dead, fade the spinner anyway so the
+// user at least sees the side panel and any cached state.
+setTimeout(() => {
+  if (!loaderEl.classList.contains('hidden')) {
+    setLoaderStage('still loading… (network slow?)');
+  }
+}, 3000);
+setTimeout(() => {
+  loaderEl.classList.add('hidden');
+  setTimeout(() => loaderEl.classList.add('gone'), 360);
+}, 6000);
+// Track in-flight fetches → toggle the small top-right spinner
+let _inflight = 0;
+function startFetch() { if (++_inflight === 1) sceneBusyEl.classList.add('visible'); }
+function endFetch()   { if (--_inflight <= 0) { _inflight = 0; sceneBusyEl.classList.remove('visible'); } }
 
 // ---- toast notifications ----
 const toastHost = document.getElementById('toast-host');
@@ -195,13 +712,183 @@ sceneEl.appendChild(labelRenderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0c0d10);
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
-camera.position.set(5, 4, 5);
+const perspCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
+perspCamera.position.set(5, 4, 5);
+
+// Orthographic camera — frustum sized so the room is comfortably framed.
+// Re-sized by fit() to match the scene aspect ratio.
+const orthoCamera = new THREE.OrthographicCamera(-4, 4, 4, -4, 0.01, 200);
+orthoCamera.position.set(5, 4, 5);
+
+// "camera" is the active one; we swap which one OrbitControls + render
+// receive when the user toggles modes. Note: `let` not `const` so the
+// existing `controls.update()` / `renderer.render(scene, camera)` calls
+// keep working after we reassign.
+let camera = perspCamera;
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(2, 1, 2);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
+
+function setCameraMode(mode) {
+  const target = controls.target.clone();
+  const pos = camera.position.clone();
+  if (mode === 'ortho' && camera !== orthoCamera) {
+    orthoCamera.position.copy(pos);
+    camera = orthoCamera;
+  } else if (mode === 'persp' && camera !== perspCamera) {
+    perspCamera.position.copy(pos);
+    camera = perspCamera;
+  } else return;
+  // OrbitControls captures the camera reference internally — easiest is to
+  // re-attach. Use the public `object` setter (works in r0.160).
+  controls.object = camera;
+  controls.target.copy(target);
+  controls.update();
+  fit();
+  // Reflect in UI
+  document.querySelectorAll('#view-controls [data-cam]').forEach(b =>
+    b.classList.toggle('active', b.dataset.cam === mode));
+}
+
+// Snap to a canonical view. Animates over ~360ms.
+function snapView(name) {
+  // Frame around the room midpoint (falls back to 2,1,2 if no room).
+  const tgt = roomDims
+    ? new THREE.Vector3(roomDims.W / 2, roomDims.H / 2, roomDims.D / 2)
+    : controls.target.clone();
+  // Distance set so the room fills ~60% of the viewport.
+  const span = roomDims ? Math.max(roomDims.W, roomDims.D, roomDims.H) : 3;
+  const d = span * 1.4 + 1.5;
+  let pos;
+  switch (name) {
+    case 'top':   pos = tgt.clone().add(new THREE.Vector3( 0,  d * 1.2,  0.01)); break;
+    case 'front': pos = tgt.clone().add(new THREE.Vector3( 0,  0,        -d  )); break;
+    case 'back':  pos = tgt.clone().add(new THREE.Vector3( 0,  0,         d  )); break;
+    case 'left':  pos = tgt.clone().add(new THREE.Vector3(-d,  0,         0  )); break;
+    case 'right': pos = tgt.clone().add(new THREE.Vector3( d,  0,         0  )); break;
+    case 'iso':
+    default:      pos = tgt.clone().add(new THREE.Vector3( d * 0.7, d * 0.7, d * 0.7));
+  }
+  // Tween camera position + target. Small custom tween (no GSAP needed).
+  if (typeof wake === 'function') wake(500);
+  const startPos = camera.position.clone();
+  const startTgt = controls.target.clone();
+  const t0 = performance.now();
+  const dur = 380;
+  function step() {
+    const t = Math.min(1, (performance.now() - t0) / dur);
+    // ease-in-out cubic
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    camera.position.lerpVectors(startPos, pos, e);
+    controls.target.lerpVectors(startTgt, tgt, e);
+    controls.update();
+    if (t < 1) requestAnimationFrame(step);
+  }
+  step();
+}
+
+// ---- view cube widget ----
+// A small 3D cube in the corner with labeled clickable faces.
+// Rotation tracks the main camera; clicking a face snaps the main camera
+// so that face is what you're looking at.
+//
+// Three.js cube material index → face direction → room view name:
+//   0  +X  right
+//   1  -X  left
+//   2  +Y  top      (Y-up convention)
+//   3  -Y  bottom   (not in our snapView; we treat as top-down upside-down)
+//   4  +Z  back     (room y → three.z, so +Z is "back of room")
+//   5  -Z  front
+const vcContainer = document.getElementById('view-cube');
+const vcRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+vcRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+vcRenderer.setSize(110, 110);
+vcContainer.appendChild(vcRenderer.domElement);
+
+const vcScene = new THREE.Scene();
+const vcCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 10);
+vcCamera.position.set(0, 0, 3.4);
+vcScene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const vcLight = new THREE.DirectionalLight(0xffffff, 0.8);
+vcLight.position.set(2, 2, 3);
+vcScene.add(vcLight);
+
+function makeFaceTexture(label, isTop = false) {
+  // Crisp text on a flat-colored face. 256² is plenty at 110-px display.
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  // Subtle bluish-grey face
+  g.fillStyle = '#2a3340';
+  g.fillRect(0, 0, 256, 256);
+  // Inner highlight border for "tile" feel
+  g.strokeStyle = '#4a5b78';
+  g.lineWidth = 6;
+  g.strokeRect(6, 6, 244, 244);
+  g.fillStyle = '#e6e9ef';
+  g.font = '700 56px -apple-system, "SF Pro Display", system-ui, sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(label, 128, 138);
+  // Subtle accent stripe along the bottom for the top face so you can
+  // distinguish it from bottom at a glance even when rotated.
+  if (isTop) {
+    g.fillStyle = '#1d6fef';
+    g.fillRect(0, 232, 256, 6);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Face order matches BoxGeometry: +X, -X, +Y, -Y, +Z, -Z
+const vcFaceLabels = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'BACK', 'FRONT'];
+const vcFaceViews  = ['right', 'left',  'top', 'top',    'back', 'front'];
+const vcMaterials = vcFaceLabels.map((label, i) => new THREE.MeshStandardMaterial({
+  map: makeFaceTexture(label, i === 2),
+  roughness: 0.6, metalness: 0.1,
+}));
+const vcCube = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 1.2), vcMaterials);
+vcScene.add(vcCube);
+
+// Click → raycast → snap view (or invert for the bottom click → "top")
+const vcRaycaster = new THREE.Raycaster();
+const vcMouse = new THREE.Vector2();
+vcContainer.addEventListener('click', (ev) => {
+  const rect = vcContainer.getBoundingClientRect();
+  vcMouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  vcMouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  vcRaycaster.setFromCamera(vcMouse, vcCamera);
+  const hits = vcRaycaster.intersectObject(vcCube, false);
+  if (!hits.length) return;
+  const faceIdx = Math.floor(hits[0].face.materialIndex);  // 0..5
+  const view = vcFaceViews[faceIdx];
+  snapView(view);
+});
+
+// Per-frame sync of the cube's orientation to the main camera's view.
+// We want the face that the main camera is closest to to be the one we
+// see in the widget. Achieved by giving the cube the inverse of the
+// camera's quaternion (transformed into "looking from camera position
+// toward target" space).
+const _vcDir = new THREE.Vector3();
+const _vcQ = new THREE.Quaternion();
+const _vcUp = new THREE.Vector3(0, 1, 0);
+function tickViewCube() {
+  // direction from target to camera, normalized
+  _vcDir.copy(camera.position).sub(controls.target).normalize();
+  // Build a quaternion that orients a +Z-facing object toward _vcDir.
+  // Then invert so the cube rotates the OPPOSITE way (we want to see
+  // the face that's "near the camera in scene space"); rotating the
+  // cube opposite gives that visual.
+  const m = new THREE.Matrix4().lookAt(_vcDir, new THREE.Vector3(0, 0, 0), _vcUp);
+  _vcQ.setFromRotationMatrix(m);
+  vcCube.quaternion.copy(_vcQ).invert();
+  vcRenderer.render(vcScene, vcCamera);
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -325,40 +1012,934 @@ function fit() {
   const w = sceneEl.clientWidth, h = sceneEl.clientHeight;
   renderer.setSize(w, h);
   labelRenderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  const aspect = w / h;
+  perspCamera.aspect = aspect;
+  perspCamera.updateProjectionMatrix();
+  // Frame the ortho cam so its vertical extent matches the perspective
+  // cam at its current distance from target. That way toggling between
+  // them feels like a "flatten" and not a sudden zoom.
+  const dist = perspCamera.position.distanceTo(controls.target);
+  const v = Math.tan(perspCamera.fov * Math.PI / 360) * dist;
+  orthoCamera.top    =  v;
+  orthoCamera.bottom = -v;
+  orthoCamera.left   = -v * aspect;
+  orthoCamera.right  =  v * aspect;
+  orthoCamera.updateProjectionMatrix();
 }
 addEventListener('resize', fit);
 fit();
 
-// Render loop
-function loop() {
-  requestAnimationFrame(loop);
-  controls.update();
-  renderer.render(scene, camera);
-  labelRenderer.render(scene, camera);
+// ---- live track + entity rendering ----
+// Two layers:
+//   1. tracks: one per persistent identity (survives MAC rotation)
+//   2. entities: clusters of co-located tracks (one physical person/
+//      object broadcasting multiple Continuity protocols)
+//
+// The track sphere stays small + per-track-colored. When ≥2 tracks
+// cluster as one entity, an ENTITY OVERLAY appears at the cluster
+// centroid — a larger translucent sphere ringed by the count of
+// member tracks, colored by entity_id.
+const deviceGroup = new THREE.Group();
+const entityGroup = new THREE.Group();
+const trailGroup = new THREE.Group();
+const predictionGroup = new THREE.Group();
+const heatmapGroup = new THREE.Group();
+scene.add(deviceGroup);
+scene.add(entityGroup);
+scene.add(trailGroup);
+scene.add(predictionGroup);
+scene.add(heatmapGroup);
+const deviceByTrack = new Map();
+const entityByID = new Map();
+// What the user has clicked on (track_id or entity_id). The selected
+// thing gets extra visual treatment + heatmap overlay.
+let focusedKey = null;       // string key (track_id or entity_id)
+let focusedKind = null;      // 'track' or 'entity'
+const LERP_RATE = 0.08;
+const STALE_AFTER_MS = 6000;  // start fading
+const REMOVE_AFTER_MS = 12000;
+
+// Color is hashed from the track_id so a track keeps its color across
+// MAC rotations. (For unknown contexts we still use the MAC-hash fn —
+// kept for backward compat.)
+function hashHue(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return ((h % 360) + 360) % 360;
 }
-loop();
+function trackColor(track_id) { return new THREE.Color().setHSL(hashHue(track_id) / 360, 0.7, 0.6); }
+function macColor(mac) { return new THREE.Color().setHSL(hashHue(mac) / 360, 0.7, 0.6); }
+
+// ---- device names ----
+// Every MAC gets an auto-assigned 2-word codename ("ruby kestrel",
+// "frost owl") deterministic from the MAC, so the same address always
+// shows the same name. User can override per-MAC via the sidebar input;
+// overrides are persisted to localStorage. Auto-names are NOT persisted —
+// they're regenerated identically on every load from the hash. 16 × 32 =
+// 512 combos, so collisions are rare among the ≲30 visible devices.
+const ADJECTIVES = [
+  'ruby','jade','ash','copper','slate','dusk','dawn','amber',
+  'frost','ember','silver','pearl','onyx','rust','smoke','rose',
+];
+const BIRDS = [
+  'auk','jay','owl','dove','hawk','wren','lark','kite',
+  'gull','tern','crow','robin','raven','finch','swift','snipe',
+  'ibis','egret','heron','plover','pipit','vireo','junco','oriole',
+  'thrush','merlin','falcon','magpie','sparrow','swallow','shrike','condor',
+];
+function hashStr(s) {
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+function autoName(mac) {
+  const a = ADJECTIVES[Math.abs(hashStr(mac)) % ADJECTIVES.length];
+  const b = BIRDS[Math.abs(hashStr(mac + ':bird')) % BIRDS.length];
+  return `${a} ${b}`;
+}
+const ENTITY_NAMES_KEY = 'mockingbird.entityNames';
+let entityNames = {};
+try { entityNames = JSON.parse(localStorage.getItem(ENTITY_NAMES_KEY) || '{}'); }
+catch { entityNames = {}; }
+
+function getEntityName(eid, fallback) {
+  return entityNames[eid] || fallback || eid.slice(0, 8);
+}
+function setEntityName(eid, name) {
+  name = (name || '').trim().slice(0, 24);
+  if (name) entityNames[eid] = name;
+  else delete entityNames[eid];
+  localStorage.setItem(ENTITY_NAMES_KEY, JSON.stringify(entityNames));
+}
+function isEntityNamed(eid) { return !!entityNames[eid]; }
+
+const NAMES_KEY = 'mockingbird.deviceNames';
+const SHOW_ALL_KEY = 'mockingbird.showAllLabels';
+let macNames = {};  // user overrides only
+try { macNames = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}'); }
+catch { macNames = {}; }
+// Default labels ON now that every device has a short readable name.
+let showAllLabels = localStorage.getItem(SHOW_ALL_KEY);
+showAllLabels = showAllLabels == null ? true : showAllLabels === 'true';
+const ELLIPSOID_KEY = 'mockingbird.showEllipsoids';
+let showEllipsoids = localStorage.getItem(ELLIPSOID_KEY);
+showEllipsoids = showEllipsoids == null ? true : showEllipsoids === 'true';
+
+// Track names come from the server (server-side TrackStore uses the same
+// adjective+bird scheme keyed off track_id). User overrides are stored
+// per track_id in localStorage and survive page reloads. The autoName()
+// + macNames key are kept around for backward compat in case some code
+// path still passes a MAC, but the primary path now uses track names.
+function getName(track) {
+  // `track` can be a full device dict (with track_id + track_name) or a MAC.
+  if (typeof track === 'object' && track) {
+    return macNames[track.track_id] || track.track_name || autoName(track.mac || '');
+  }
+  return macNames[track] || autoName(track || '');
+}
+function isUserNamed(key) { return !!macNames[key]; }
+function setName(key, name) {
+  name = (name || '').trim().slice(0, 24);
+  if (name) macNames[key] = name;
+  else delete macNames[key];
+  localStorage.setItem(NAMES_KEY, JSON.stringify(macNames));
+}
+function deviceLabelText(deviceOrMac, rssi) {
+  return `${getName(deviceOrMac)} · ${rssi} dBm`;
+}
+function deviceLabelShouldShow() { return showAllLabels; }
+
+function ensureTrackEntry(track_id) {
+  let entry = deviceByTrack.get(track_id);
+  if (entry) return entry;
+  const color = trackColor(track_id);
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 16, 12),
+    new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.6, transparent: true, opacity: 1.0,
+    })
+  );
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 16, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, depthWrite: false })
+  );
+  sphere.add(halo);
+  // Uncertainty ellipsoid: wireframe only (no fill — fill engulfs the
+  // room when σ is ~1m). Geometry uses sparser segments so the wires
+  // are readable, not a dense mesh. We display at HALF the actual σ
+  // for visual clarity — covariance is still mathematically correct,
+  // just shown at 0.5σ so 1m-σ devices get a 50cm-radius ellipsoid.
+  const ellipsoid = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 12, 6)),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 })
+  );
+  deviceGroup.add(ellipsoid);
+  // Velocity vector — small arrow from sphere center along Kalman-
+  // estimated velocity. Hidden when velocity is near zero (stationary).
+  const velArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0),
+    0.001, color, 0.06, 0.04,
+  );
+  velArrow.visible = false;
+  deviceGroup.add(velArrow);
+  const labelEl = document.createElement('div');
+  labelEl.style.cssText = `
+    color: #e6e9ef; font: 10px ui-monospace, "SF Mono", monospace;
+    background: rgba(20,22,26,0.85); padding: 2px 5px; border-radius: 3px;
+    border: 1px solid #2a2e36; white-space: nowrap;
+  `;
+  const label = new CSS2DObject(labelEl);
+  label.position.set(0, 0.18, 0);
+  sphere.add(label);
+  deviceGroup.add(sphere);
+
+  // Trail: a single Line geometry that we resize each update. Vertex
+  // colors fade older points toward transparency (alpha encoded as
+  // material opacity — three.Line supports vertex colors but not
+  // vertex-alpha; we approximate by darkening toward black at the tail).
+  const trailGeom = new THREE.BufferGeometry();
+  trailGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  trailGeom.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(0), 3));
+  const trailMat = new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9,
+  });
+  const trail = new THREE.Line(trailGeom, trailMat);
+  trailGroup.add(trail);
+
+  entry = { sphere, target: new THREE.Vector3(), labelEl, lastSeen: 0,
+            rssi: -100, color, halo, trail, trailGeom,
+            ellipsoid, velArrow };
+  deviceByTrack.set(track_id, entry);
+  return entry;
+}
+
+// 3×3 symmetric eigendecomposition via Jacobi sweeps. Good enough for
+// our 3D covariance matrices — small, well-conditioned. Returns
+// {values: [λ1,λ2,λ3], vectors: [v1, v2, v3] (each a length-3 array)}.
+function eigh3x3(A) {
+  // Copy as mutable
+  const a = [A[0].slice(), A[1].slice(), A[2].slice()];
+  // Identity matrix for accumulated rotations
+  const V = [[1,0,0],[0,1,0],[0,0,1]];
+  for (let sweep = 0; sweep < 12; sweep++) {
+    // Pick the largest off-diagonal
+    let p=0, q=1, max=Math.abs(a[0][1]);
+    if (Math.abs(a[0][2]) > max) { p=0; q=2; max=Math.abs(a[0][2]); }
+    if (Math.abs(a[1][2]) > max) { p=1; q=2; max=Math.abs(a[1][2]); }
+    if (max < 1e-10) break;
+    // Compute Jacobi rotation angle
+    const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+    let t;
+    if (Math.abs(theta) > 1e10) t = 1 / (2 * theta);
+    else t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta*theta + 1));
+    const c = 1 / Math.sqrt(t*t + 1), s = t * c;
+    // Apply rotation to a and V
+    for (let i = 0; i < 3; i++) {
+      if (i !== p && i !== q) {
+        const aip = a[i][p], aiq = a[i][q];
+        a[i][p] = a[p][i] = c*aip - s*aiq;
+        a[i][q] = a[q][i] = s*aip + c*aiq;
+      }
+      const vip = V[i][p], viq = V[i][q];
+      V[i][p] = c*vip - s*viq;
+      V[i][q] = s*vip + c*viq;
+    }
+    const app = a[p][p], aqq = a[q][q], apq = a[p][q];
+    a[p][p] = c*c*app - 2*s*c*apq + s*s*aqq;
+    a[q][q] = s*s*app + 2*s*c*apq + c*c*aqq;
+    a[p][q] = a[q][p] = 0;
+  }
+  return {
+    values: [a[0][0], a[1][1], a[2][2]],
+    vectors: V,
+  };
+}
+
+// Display the ellipsoid at HALF the σ scale so it visually communicates
+// shape + relative confidence without engulfing the room. The math is
+// still 1σ; just the rendering shrinks for clarity.
+const ELLIPSOID_VIS_SCALE = 0.5;
+const ELLIPSOID_MIN = 0.12;
+const ELLIPSOID_MAX = 0.8;
+
+function updateEllipsoidFromCov(entry, cov, pos) {
+  // cov is 3×3 in ROOM coords (x=room.x, y=room.y, z=room.z).
+  // The 3D scene uses (room.x, room.z, room.y) → permute rows/cols 2↔3.
+  const C = [
+    [cov[0][0], cov[0][2], cov[0][1]],
+    [cov[2][0], cov[2][2], cov[2][1]],
+    [cov[1][0], cov[1][2], cov[1][1]],
+  ];
+  const e = eigh3x3(C);
+  const sx = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[0]))));
+  const sy = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[1]))));
+  const sz = Math.min(ELLIPSOID_MAX, Math.max(ELLIPSOID_MIN, ELLIPSOID_VIS_SCALE * Math.sqrt(Math.max(0, e.values[2]))));
+  entry.ellipsoid.position.copy(pos);
+  entry.ellipsoid.scale.set(sx, sy, sz);
+  const m = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(e.vectors[0][0], e.vectors[1][0], e.vectors[2][0]),
+    new THREE.Vector3(e.vectors[0][1], e.vectors[1][1], e.vectors[2][1]),
+    new THREE.Vector3(e.vectors[0][2], e.vectors[1][2], e.vectors[2][2]),
+  );
+  entry.ellipsoid.quaternion.setFromRotationMatrix(m);
+}
+
+// Update the velocity arrow from the Kalman state's vx/vy/vz fields.
+// Renders only when the device has been moving (|v| > 0.05 m/s).
+function updateVelocityArrow(entry, vel_xyz, pos) {
+  if (!vel_xyz) {
+    entry.velArrow.visible = false;
+    return;
+  }
+  // Kalman state vel is in ROOM coords (vx, vy, vz). Three.js axes
+  // are (room.x, room.z, room.y), so reorder.
+  const vx = vel_xyz[0], vy = vel_xyz[2], vz = vel_xyz[1];
+  const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
+  // Threshold raised from 5 cm/s to 20 cm/s — anything below that is
+  // almost certainly Kalman drift from RSSI jitter, not real motion.
+  // 20 cm/s is roughly "slow walking pace" minimum.
+  if (speed < 0.20) {
+    entry.velArrow.visible = false;
+    return;
+  }
+  entry.velArrow.visible = true;
+  entry.velArrow.position.copy(pos);
+  // Arrow length scales with speed, capped so a fast-mover arrow doesn't
+  // span the room.
+  const arrowLen = Math.min(0.6, Math.max(0.12, speed));
+  entry.velArrow.setLength(arrowLen, 0.06, 0.04);
+  entry.velArrow.setDirection(new THREE.Vector3(vx, vy, vz).normalize());
+}
+
+function styleLabelForKey(labelEl, key) {
+  if (isUserNamed(key)) {
+    labelEl.style.borderColor = '#1d6fef';
+    labelEl.style.color = '#79c4ff';
+    labelEl.style.fontWeight = '600';
+  } else {
+    labelEl.style.borderColor = '#2a2e36';
+    labelEl.style.color = '#e6e9ef';
+    labelEl.style.fontWeight = '';
+  }
+}
+
+// Compress server trail (array of {ts,x,y,z}) into Float32Array buffers
+// for the Line geometry. Color attribute fades from full color (head) to
+// near-black (tail) so it looks like a comet trail.
+function updateTrailGeometry(entry, trail, color) {
+  if (!trail || trail.length < 2) {
+    entry.trailGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    entry.trailGeom.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(0), 3));
+    entry.trailGeom.attributes.position.needsUpdate = true;
+    return;
+  }
+  const n = trail.length;
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  // Server stores oldest first; head of the trail = newest point.
+  for (let i = 0; i < n; i++) {
+    const p = trail[i];
+    // room (x, y, z) → three (x, z, y)
+    pos[i * 3 + 0] = p.x;
+    pos[i * 3 + 1] = p.z;
+    pos[i * 3 + 2] = p.y;
+    // Fade: oldest gets factor 0.05, newest gets 1.0
+    const f = 0.05 + 0.95 * (i / (n - 1));
+    col[i * 3 + 0] = color.r * f;
+    col[i * 3 + 1] = color.g * f;
+    col[i * 3 + 2] = color.b * f;
+  }
+  entry.trailGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  entry.trailGeom.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+  entry.trailGeom.attributes.position.needsUpdate = true;
+  entry.trailGeom.attributes.color.needsUpdate = true;
+  entry.trailGeom.computeBoundingSphere();
+}
+
+// Per-track trail history accumulated CLIENT-SIDE. Server used to send
+// the full 40s trail every poll (~200 KB JSON, ~91% of payload, ~1-2 s
+// serialization stall on Pi Zero W). Now it sends just the latest point
+// per tick and we maintain the buffer here.
+const CLIENT_TRAIL_CAP = 80;       // ~40 s of history at 500 ms poll
+function pushTrailPoint(entry, d) {
+  if (!entry.clientTrail) entry.clientTrail = [];
+  entry.clientTrail.push({ x: d.x, y: d.y, z: d.z });
+  if (entry.clientTrail.length > CLIENT_TRAIL_CAP) {
+    entry.clientTrail.splice(0, entry.clientTrail.length - CLIENT_TRAIL_CAP);
+  }
+}
+
+function ensureEntityOverlay(entity_id, color) {
+  let e = entityByID.get(entity_id);
+  if (e) return e;
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.14, 24, 16),
+    new THREE.MeshStandardMaterial({
+      color, emissive: color, emissiveIntensity: 0.45,
+      transparent: true, opacity: 0.42, depthWrite: false,
+    })
+  );
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.22, 0.012, 8, 32),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.65, depthWrite: false })
+  );
+  ring.rotation.x = Math.PI / 2;
+  sphere.add(ring);
+  const labelEl = document.createElement('div');
+  labelEl.style.cssText = `
+    color: white; font: 600 11px -apple-system, "SF Pro Text", sans-serif;
+    background: rgba(20,22,26,0.92); padding: 3px 8px; border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.4); white-space: nowrap;
+    text-shadow: 0 0 4px rgba(0,0,0,0.8);
+  `;
+  const label = new CSS2DObject(labelEl);
+  label.position.set(0, 0.34, 0);
+  sphere.add(label);
+  // Entity-level uncertainty ellipsoid — should be MUCH tighter than per-
+  // track because of the √N fusion benefit.
+  const ellipsoid = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.SphereGeometry(1.0, 12, 6)),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })
+  );
+  // Entity velocity arrow (white/brighter to stand out from per-track arrows)
+  const velArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0),
+    0.001, 0xffffff, 0.08, 0.05,
+  );
+  velArrow.visible = false;
+  // Prediction line: dashed segment extrapolating velocity 3 s ahead.
+  // Uses LineDashedMaterial which requires .computeLineDistances() after
+  // geometry update; we use a simple two-point line for now and dash via
+  // alternating opacity by drawing many short segments.
+  const predGeom = new THREE.BufferGeometry();
+  predGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  const predLine = new THREE.LineSegments(
+    predGeom,
+    new THREE.LineDashedMaterial({
+      color, transparent: true, opacity: 0.55,
+      dashSize: 0.08, gapSize: 0.05,
+    }),
+  );
+  predLine.visible = false;
+  predictionGroup.add(predLine);
+  entityGroup.add(sphere);
+  entityGroup.add(ellipsoid);
+  entityGroup.add(velArrow);
+  e = { sphere, ring, ellipsoid, velArrow, predLine, labelEl, color,
+        lastSeen: 0, target: new THREE.Vector3() };
+  entityByID.set(entity_id, e);
+  return e;
+}
+
+// Update the dashed prediction line for an entity based on its current
+// Kalman velocity. Extrapolates PREDICTION_HORIZON_S seconds ahead and
+// draws a dashed segment from the current position out to that future
+// point. Hidden if velocity is below the real-motion threshold.
+const PREDICTION_HORIZON_S = 3.0;
+function updatePredictionLine(eOv, vel_xyz, pos) {
+  if (!vel_xyz) { eOv.predLine.visible = false; return; }
+  const vx = vel_xyz[0], vy = vel_xyz[2], vz = vel_xyz[1];  // room→three swap
+  const speed = Math.sqrt(vx*vx + vy*vy + vz*vz);
+  if (speed < 0.20) { eOv.predLine.visible = false; return; }
+  eOv.predLine.visible = true;
+  // Build dashed segment from (pos) → (pos + v * PREDICTION_HORIZON_S)
+  const ex = pos.x + vx * PREDICTION_HORIZON_S;
+  const ey = pos.y + vy * PREDICTION_HORIZON_S;
+  const ez = pos.z + vz * PREDICTION_HORIZON_S;
+  eOv.predLine.geometry.setAttribute('position', new THREE.BufferAttribute(
+    new Float32Array([pos.x, pos.y, pos.z, ex, ey, ez]), 3));
+  eOv.predLine.geometry.attributes.position.needsUpdate = true;
+  eOv.predLine.computeLineDistances();
+}
+
+function applyLiveDevices(devices, entities) {
+  const now = performance.now();
+  // Entity overlays — server now fuses member tracks (information-form
+  // average of MLE positions + entity-level Kalman) and gives us the
+  // result. Client just renders it.
+  for (const e of (entities || [])) {
+    const overlay = ensureEntityOverlay(e.entity_id, trackColor(e.entity_id));
+    overlay.target.set(e.x, e.z, e.y);  // room→three swap
+    overlay.lastSeen = now;
+    overlay.lastEntity = e;
+    // σ summary in label so you can see the fusion benefit at a glance
+    const cov = e.cov;
+    const sigma = cov
+      ? Math.sqrt(Math.max(0, (cov[0][0] + cov[1][1] + cov[2][2]) / 3))
+      : null;
+    const displayName = getEntityName(e.entity_id, e.entity_name);
+    overlay.labelEl.textContent =
+      `${displayName} · ${e.n_tracks} tracks` +
+      (sigma != null ? ` · σ=${(sigma*100).toFixed(0)}cm` : '');
+    overlay.labelEl.style.display = showAllLabels ? '' : 'none';
+  }
+  // Individual tracks (always rendered)
+  for (const d of devices) {
+    const entry = ensureTrackEntry(d.track_id);
+    entry.target.set(d.x, d.z, d.y);
+    entry.lastSeen = now;
+    entry.rssi = d.rssi_max;
+    entry.nLeaves = d.n_leaves;
+    entry.lastDevice = d;
+    entry.labelEl.textContent = deviceLabelText(d, d.rssi_max);
+    entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
+    styleLabelForKey(entry.labelEl, d.track_id);
+    pushTrailPoint(entry, d);
+    updateTrailGeometry(entry, entry.clientTrail, entry.color);
+    // Uncertainty ellipsoid (1σ, drawn at 0.5× scale for visual clarity)
+    if (d.cov && d.pos_method && d.pos_method.startsWith('mle') && showEllipsoids) {
+      entry.ellipsoid.visible = true;
+      updateEllipsoidFromCov(entry, d.cov, entry.target);
+    } else {
+      entry.ellipsoid.visible = false;
+    }
+    // Velocity arrow from Kalman state
+    updateVelocityArrow(entry, d.velocity, entry.target);
+  }
+}
+
+// Walk the existing track meshes and refresh label visibility + text.
+// Called when "show labels" is toggled or a name override is typed —
+// avoids waiting for the next poll for the change to take effect.
+function refreshDeviceLabels() {
+  for (const [tid, e] of deviceByTrack) {
+    if (e.lastDevice) e.labelEl.textContent = deviceLabelText(e.lastDevice, e.rssi);
+    e.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
+    styleLabelForKey(e.labelEl, tid);
+  }
+  // ALSO toggle leaf labels — the user expects "Show labels in 3D" to
+  // apply to everything in the scene, not just devices.
+  for (const [name, entry] of leavesByName) {
+    if (entry.labelEl) entry.labelEl.style.display = deviceLabelShouldShow() ? '' : 'none';
+  }
+}
+
+function tickDeviceAnimation() {
+  const now = performance.now();
+  // Animate entity overlays (slow lerp like tracks, fade after STALE)
+  for (const [eid, eOv] of entityByID) {
+    eOv.sphere.position.lerp(eOv.target, LERP_RATE);
+    eOv.ring.rotation.z += 0.012;
+    const age = now - eOv.lastSeen;
+    if (age > REMOVE_AFTER_MS) {
+      entityGroup.remove(eOv.sphere);
+      entityGroup.remove(eOv.ellipsoid);
+      entityGroup.remove(eOv.velArrow);
+      predictionGroup.remove(eOv.predLine);
+      entityByID.delete(eid);
+      continue;
+    }
+    const fadeMul = age > STALE_AFTER_MS ?
+      Math.max(0, 1 - (age - STALE_AFTER_MS) / (REMOVE_AFTER_MS - STALE_AFTER_MS)) : 1;
+    eOv.sphere.material.opacity = 0.42 * fadeMul;
+    eOv.ring.material.opacity   = 0.65 * fadeMul;
+    eOv.labelEl.style.opacity   = fadeMul;
+    // Ellipsoid follows the (smoothly-lerped) entity sphere
+    if (eOv.lastEntity && eOv.lastEntity.cov && showEllipsoids) {
+      eOv.ellipsoid.visible = true;
+      eOv.ellipsoid.material.opacity = 0.55 * fadeMul;
+      updateEllipsoidFromCov(eOv, eOv.lastEntity.cov, eOv.sphere.position);
+    } else {
+      eOv.ellipsoid.visible = false;
+    }
+    if (eOv.lastEntity && eOv.lastEntity.velocity) {
+      updateVelocityArrow(eOv, eOv.lastEntity.velocity, eOv.sphere.position);
+      updatePredictionLine(eOv, eOv.lastEntity.velocity, eOv.sphere.position);
+    } else {
+      eOv.velArrow.visible = false;
+      eOv.predLine.visible = false;
+    }
+  }
+  for (const [tid, e] of deviceByTrack) {
+    e.sphere.position.lerp(e.target, LERP_RATE);
+    // Ellipsoid follows the (smoothly-lerped) sphere position so it never
+    // teleports — but its scale/rotation are only changed when a fresh
+    // cov arrives (via updateEllipsoidFromCov).
+    if (e.ellipsoid) e.ellipsoid.position.copy(e.sphere.position);
+    const age = now - e.lastSeen;
+    if (age > REMOVE_AFTER_MS) {
+      deviceGroup.remove(e.sphere);
+      if (e.ellipsoid) deviceGroup.remove(e.ellipsoid);
+      if (e.velArrow)  deviceGroup.remove(e.velArrow);
+      trailGroup.remove(e.trail);
+      e.trailGeom.dispose();
+      deviceByTrack.delete(tid);
+      continue;
+    }
+    if (age > STALE_AFTER_MS) {
+      const fade = Math.max(0, 1 - (age - STALE_AFTER_MS) / (REMOVE_AFTER_MS - STALE_AFTER_MS));
+      e.sphere.material.opacity = fade;
+      e.halo.material.opacity = fade * 0.18;
+      e.labelEl.style.opacity = fade;
+      e.trail.material.opacity = fade * 0.9;
+      if (e.ellipsoid && e.ellipsoid.visible) e.ellipsoid.material.opacity = fade * 0.45;
+    } else {
+      e.sphere.material.opacity = 1;
+      e.halo.material.opacity = 0.18;
+      e.labelEl.style.opacity = 1;
+      e.trail.material.opacity = 0.9;
+      if (e.ellipsoid && e.ellipsoid.visible) e.ellipsoid.material.opacity = 0.45;
+    }
+  }
+}
 
 // ---- leaves ----
 // Three.js uses Y-up. We map (x_room, y_room, z_room) → (x, z, y) in three:
 //   x_room   → three.x (right)
 //   y_room   → three.z (forward away from viewer)
 //   z_room   → three.y (up)
+// NOTE: these `const`s must initialize BEFORE loop() is invoked below,
+// otherwise tickLeafRotation hits the temporal dead zone on frame 1.
 const COLORS = [0x60a5fa, 0xa78bfa, 0xf472b6, 0x34d399, 0xfb923c, 0x22d3ee, 0xfbbf24, 0xf87171];
-
 const leafGroup = new THREE.Group();
 scene.add(leafGroup);
 const leavesByName = new Map();
+
+// Raycaster for click-to-select in the 3D scene.
+const _raycaster = new THREE.Raycaster();
+const _mouseNDC = new THREE.Vector2();
+sceneEl.addEventListener('click', (ev) => {
+  // Convert mouse position to normalized device coords (-1 to +1)
+  const rect = renderer.domElement.getBoundingClientRect();
+  _mouseNDC.x =  ((ev.clientX - rect.left) / rect.width)  * 2 - 1;
+  _mouseNDC.y = -((ev.clientY - rect.top)  / rect.height) * 2 + 1;
+  _raycaster.setFromCamera(_mouseNDC, camera);
+  // Try entities first (bigger spheres, more likely intended target)
+  const entSpheres = [...entityByID.values()].map(e => e.sphere);
+  let hits = _raycaster.intersectObjects(entSpheres, false);
+  if (hits.length) {
+    const sphere = hits[0].object;
+    for (const [eid, e] of entityByID) {
+      if (e.sphere === sphere) {
+        setFocused(eid, 'entity');
+        return;
+      }
+    }
+  }
+  // Then per-track spheres
+  const trackSpheres = [...deviceByTrack.values()].map(e => e.sphere);
+  hits = _raycaster.intersectObjects(trackSpheres, false);
+  if (hits.length) {
+    const sphere = hits[0].object;
+    for (const [tid, e] of deviceByTrack) {
+      if (e.sphere === sphere) {
+        setFocused(tid, 'track');
+        return;
+      }
+    }
+  }
+  // Click on empty space → clear selection
+  setFocused(null, null);
+});
+
+function setFocused(key, kind) {
+  focusedKey = key;
+  focusedKind = kind;
+  const badge = document.getElementById('focus-badge');
+  if (key) {
+    rebuildHeatmap();
+    badge.style.display = 'block';
+    let name = '—', meta = '';
+    if (kind === 'entity') {
+      const e = entityByID.get(key);
+      if (e && e.lastEntity) {
+        name = getEntityName(key, e.lastEntity.entity_name);
+        const c = e.lastEntity.cov;
+        const σ = c ? Math.sqrt(Math.max(0, (c[0][0] + c[1][1] + c[2][2]) / 3)) : 0;
+        meta = `entity · ${e.lastEntity.n_tracks} tracks · σ=${(σ*100).toFixed(0)}cm`;
+      }
+    } else if (kind === 'track') {
+      const t = deviceByTrack.get(key);
+      if (t && t.lastDevice) {
+        name = t.lastDevice.track_name;
+        meta = `track · rssi ${t.lastDevice.rssi_max} dBm · ${t.lastDevice.n_leaves}L`;
+      }
+    }
+    document.getElementById('focus-name').textContent = name;
+    document.getElementById('focus-meta').textContent = meta + ' · click empty to clear';
+  } else {
+    heatmapMesh.visible = false;
+    badge.style.display = 'none';
+  }
+  // Highlight the selected sphere with a bigger glow ring
+  for (const [tid, e] of deviceByTrack) {
+    e.halo.material.opacity = (kind === 'track' && tid === key) ? 0.55 : 0.18;
+  }
+  for (const [eid, e] of entityByID) {
+    e.ring.material.opacity = (kind === 'entity' && eid === key) ? 1.0 : 0.65;
+  }
+  // Toast so the user knows it's selected
+  if (key) {
+    let label = '';
+    if (kind === 'entity') {
+      const e = entityByID.get(key);
+      label = e && e.lastEntity ? (getEntityName(key, e.lastEntity.entity_name)) : key.slice(0,8);
+    } else {
+      const t = deviceByTrack.get(key);
+      label = t && t.lastDevice ? t.lastDevice.track_name : key.slice(0,8);
+    }
+    toast(`focused on ${label} — likelihood heatmap shown on floor`, 'ok', 4000);
+  }
+}
+
+// Floor heatmap. For the focused device/entity, sample a grid of (x,y)
+// points across the floor plane and compute the log-likelihood that the
+// device is at that point given its observed per-leaf RSSI vector and
+// the path-loss model. Visualizes the math: a bright spot exactly where
+// the system thinks the device is, fading out as you move away.
+const HEATMAP_RES = 40;       // 40×40 grid cells → 1600 samples
+let heatmapMesh = null;
+let _lastCalibration = null;
+let _leafPosCache = null;
+let _roomDimsCache = null;
+let _lastHeatmapRssi = null;     // last rssi vector that triggered a chi² recompute
+let _lastHeatmapKey = null;      // focusedKey:focusedKind at last compute
+
+(function initHeatmap() {
+  const geom = new THREE.PlaneGeometry(1, 1, HEATMAP_RES - 1, HEATMAP_RES - 1);
+  const colors = new Float32Array(HEATMAP_RES * HEATMAP_RES * 3);
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  heatmapMesh = new THREE.Mesh(geom, mat);
+  heatmapMesh.rotation.x = -Math.PI / 2;     // lay flat
+  heatmapMesh.position.y = 0.01;             // just above the floor
+  heatmapMesh.visible = false;
+  heatmapGroup.add(heatmapMesh);
+})();
+
+let _heatmapCacheAgeTicks = 0;
+async function rebuildHeatmap() {
+  if (!focusedKey) { heatmapMesh.visible = false; _lastHeatmapRssi = null; _lastHeatmapKey = null; return; }
+  // Refresh cached cal + leaves every ~30 polls (= 15 s) so changes
+  // propagate without re-fetching on every tick.
+  if (++_heatmapCacheAgeTicks > 30) {
+    _lastCalibration = null;
+    _leafPosCache = null;
+    _heatmapCacheAgeTicks = 0;
+  }
+  const [cal, leaves] = await Promise.all([
+    _lastCalibration || fetch('/api/calibration').then(r => r.json()),
+    _leafPosCache    || fetch('/api/leaves').then(r => r.json()),
+  ]);
+  _lastCalibration = cal;
+  _leafPosCache = leaves;
+  if (!cal || !cal.calibrated || !cal.per_leaf) { heatmapMesh.visible = false; return; }
+  const W = roomDims ? roomDims.W : 4;
+  const D = roomDims ? roomDims.D : 4;
+  // Find the focused thing's RSSI vector
+  let rssiVec = null;
+  if (focusedKind === 'entity') {
+    // Aggregate member tracks' per-leaf RSSI from devices array of last poll
+    const e = entityByID.get(focusedKey);
+    if (!e) return;
+    // Reconstruct: any member track has a leaves: [{leaf, rssi}] array.
+    // Take the max RSSI per leaf across members.
+    rssiVec = {};
+    for (const [tid, te] of deviceByTrack) {
+      if (te.lastDevice && te.lastDevice.entity_id === focusedKey) {
+        for (const x of (te.lastDevice.leaves || [])) {
+          if (rssiVec[x.leaf] == null || x.rssi > rssiVec[x.leaf]) {
+            rssiVec[x.leaf] = x.rssi;
+          }
+        }
+      }
+    }
+  } else if (focusedKind === 'track') {
+    const t = deviceByTrack.get(focusedKey);
+    if (!t || !t.lastDevice) return;
+    rssiVec = {};
+    for (const x of (t.lastDevice.leaves || [])) rssiVec[x.leaf] = x.rssi;
+  }
+  if (!rssiVec || Object.keys(rssiVec).length < 2) {
+    heatmapMesh.visible = false;
+    _lastHeatmapRssi = null;
+    _lastHeatmapKey = null;
+    return;
+  }
+  // Skip the 1600-cell chi² recompute when the RSSI vector hasn't moved
+  // meaningfully (>0.5 dB on any leaf). On a typical poll the device sits
+  // still and every leaf reports within sensor noise — recomputing burns
+  // ~7 ms on desktop and ~25–40 ms on low-end Chromebooks for no visible
+  // change. The cache is keyed by (focusedKey, focusedKind) so switching
+  // selection always forces a fresh compute.
+  if (_lastHeatmapKey === focusedKey + ':' + focusedKind && _lastHeatmapRssi) {
+    let moved = false;
+    const prev = _lastHeatmapRssi;
+    for (const k in rssiVec) {
+      if (prev[k] == null || Math.abs(rssiVec[k] - prev[k]) > 0.5) { moved = true; break; }
+    }
+    if (!moved) {
+      for (const k in prev) {
+        if (rssiVec[k] == null) { moved = true; break; }
+      }
+    }
+    if (!moved) {
+      heatmapMesh.visible = true; // already drawn; just keep showing it
+      return;
+    }
+  }
+  _lastHeatmapRssi = Object.assign({}, rssiVec);
+  _lastHeatmapKey = focusedKey + ':' + focusedKind;
+  // Build a lookup: leaf -> position + cal
+  const leafInfo = {};
+  for (const L of leaves) {
+    if (L.x == null) continue;
+    const pl = cal.per_leaf[L.leaf];
+    if (!pl) continue;
+    leafInfo[L.leaf] = {
+      x: L.x, y: L.y, z: L.z,
+      p0: pl.p0, n: pl.n, sigma: pl.sigma_dbm,
+    };
+  }
+  // Grid evaluation: for each (gx, gy) sample at room midheight z,
+  // compute sum over leaves of [(rssi_observed - rssi_predicted)/σ]²
+  // → that's the negative log-likelihood (lower = better fit).
+  const zSample = (roomDims ? roomDims.H : 2.4) / 2;
+  const vals = new Float32Array(HEATMAP_RES * HEATMAP_RES);
+  let minV = Infinity, maxV = -Infinity;
+  for (let iy = 0; iy < HEATMAP_RES; iy++) {
+    for (let ix = 0; ix < HEATMAP_RES; ix++) {
+      const px = (ix / (HEATMAP_RES - 1)) * W;
+      const py = (iy / (HEATMAP_RES - 1)) * D;
+      let chi2 = 0, nleaves = 0;
+      for (const leaf in rssiVec) {
+        const li = leafInfo[leaf];
+        if (!li) continue;
+        const dx = px - li.x, dy = py - li.y, dz = zSample - li.z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (d < 0.1) continue;
+        const predicted = li.p0 - 10 * li.n * Math.log10(d);
+        const r = (rssiVec[leaf] - predicted) / Math.max(1.0, li.sigma);
+        chi2 += r * r;
+        nleaves++;
+      }
+      const v = nleaves > 0 ? chi2 / nleaves : 999;
+      vals[iy * HEATMAP_RES + ix] = v;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+  }
+  // Build vertex colors: bright at minimum (likely position), fading out
+  const colors = heatmapMesh.geometry.attributes.color.array;
+  const range = Math.max(1e-3, maxV - minV);
+  for (let i = 0; i < vals.length; i++) {
+    const t = (vals[i] - minV) / range;     // 0 = best, 1 = worst
+    // Plasma-ish: bright magenta → orange → dark, brighter for lower chi²
+    const intensity = Math.exp(-3 * t);     // sharp fall-off
+    colors[i*3+0] = intensity * 1.0;        // red
+    colors[i*3+1] = intensity * 0.2;        // green
+    colors[i*3+2] = intensity * 0.9;        // blue
+  }
+  heatmapMesh.geometry.attributes.color.needsUpdate = true;
+  // Position the plane to cover the room exactly
+  heatmapMesh.scale.set(W, D, 1);  // plane is in x,y before rotation
+  heatmapMesh.position.set(W / 2, 0.01, D / 2);
+  heatmapMesh.visible = true;
+}
+
+// Slowly rotate the leaf diamonds so their facets catch the light —
+// adds motion that distinguishes them from static spheres of any kind.
+function tickLeafRotation() {
+  for (const e of leavesByName.values()) {
+    e.mesh.rotation.y += 0.005;
+  }
+}
+
+// Render loop — pauses to ~5 fps when nothing is animating (no devices,
+// no entities, no in-flight tween, controls fully damped) to save the
+// operator's laptop battery. Wakes back to 60 fps on user interaction
+// or new data. The 200 ms idle interval still ticks the slow leaf-diamond
+// rotation so the scene doesn't feel frozen if you glance at it.
+let _wakeUntil = 0;
+const IDLE_FRAME_MS = 200;       // ~5 fps when idle
+const INTERACTION_WAKE_MS = 1500; // keep 60fps for 1.5s after any input
+function wake(ms) {
+  const t = performance.now() + (ms || INTERACTION_WAKE_MS);
+  if (t > _wakeUntil) _wakeUntil = t;
+}
+
+function _hasMotion(now) {
+  if (now < _wakeUntil) return true;
+  if (deviceByTrack.size > 0 || entityByID.size > 0) return true; // lerp/fade still settling
+  if (controls.autoRotate) return true;
+  // OrbitControls damping: when the user just stopped dragging, the
+  // camera keeps gliding a few frames. Detect by checking if controls
+  // would change anything — the cheapest proxy is the public `_state`
+  // being non-NONE, but that's private API. Instead use the wake window
+  // — pointer/wheel handlers push it forward. That's sufficient.
+  return false;
+}
+
+function renderOnce() {
+  controls.update();
+  tickLeafRotation();
+  tickDeviceAnimation();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+  tickViewCube();
+  if (!_firstFrameDrawn) {
+    _firstFrameDrawn = true;
+    setLoaderStage('fetching leaves…');
+    maybeDismissLoader();
+  }
+}
+
+function loop() {
+  renderOnce();
+  if (_hasMotion(performance.now())) {
+    requestAnimationFrame(loop);
+  } else {
+    // Idle: tick slowly via setTimeout so the leaf-diamond rotation
+    // doesn't freeze entirely, but we're not pinning a core at 60fps.
+    setTimeout(() => requestAnimationFrame(loop), IDLE_FRAME_MS);
+  }
+}
+
+// Wake on any user interaction with the scene or controls.
+['pointerdown', 'pointermove', 'wheel', 'touchstart', 'touchmove', 'keydown'].forEach(ev => {
+  sceneEl.addEventListener(ev, () => wake(), { passive: true });
+});
+controls.addEventListener('start',  () => wake(2000));
+controls.addEventListener('change', () => wake(500));
+controls.addEventListener('end',    () => wake(1200)); // cover damping coast
+
+// Wake on tab visibility return (the browser may have throttled us).
+document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
+
+setLoaderStage('compiling scene…');
+wake(3000); // warm-up: render the first 3s at 60fps so the scene composes
+loop();
 
 function ensureLeafMesh(leaf, idx) {
   let entry = leavesByName.get(leaf.leaf);
   if (!entry) {
     const color = COLORS[idx % COLORS.length];
-    const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 24, 16),
-      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.25, roughness: 0.4 })
+    // Leaves are octahedrons (diamonds) — visually distinct from the
+    // device spheres in the Live view. Reads as "fixed sensor anchor"
+    // vs "moving particle." Slightly larger than devices (0.16 vs 0.08).
+    const mesh = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.16, 0),
+      new THREE.MeshStandardMaterial({
+        color, emissive: color, emissiveIntensity: 0.3,
+        roughness: 0.3, metalness: 0.2, flatShading: true,
+      })
     );
+    // Wireframe overlay sharpens the diamond silhouette
+    const wire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(mesh.geometry),
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 })
+    );
+    mesh.add(wire);
+    // Small base disc so it feels grounded in the room
+    const disc = new THREE.Mesh(
+      new THREE.RingGeometry(0.05, 0.18, 24),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })
+    );
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.y = -0.18;
+    mesh.add(disc);
     const labelEl = document.createElement('div');
     labelEl.style.cssText = `
       background: rgba(20,22,26,0.85); color: #e6e9ef;
@@ -367,10 +1948,10 @@ function ensureLeafMesh(leaf, idx) {
       border: 1px solid #2a2e36; white-space: nowrap;
     `;
     const label = new CSS2DObject(labelEl);
-    label.position.set(0, 0.22, 0);
-    sphere.add(label);
-    leafGroup.add(sphere);
-    entry = { sphere, labelEl, color };
+    label.position.set(0, 0.26, 0);
+    mesh.add(label);
+    leafGroup.add(mesh);
+    entry = { mesh, labelEl, color };
     leavesByName.set(leaf.leaf, entry);
   }
   return entry;
@@ -380,20 +1961,94 @@ function renderLeaves(leaves) {
   // Remove ones no longer present
   const live = new Set(leaves.map(l => l.leaf));
   for (const [name, entry] of leavesByName) {
-    if (!live.has(name)) { leafGroup.remove(entry.sphere); leavesByName.delete(name); }
+    if (!live.has(name)) { leafGroup.remove(entry.mesh); leavesByName.delete(name); }
   }
-  // Place positioned ones
+  // Place positioned ones — and render estimates as semi-transparent
+  // ghosts for unpositioned leaves so the user can see where the system
+  // thinks they are while they're physically placing them.
   leaves.forEach((leaf, idx) => {
-    if (leaf.x === null || leaf.x === undefined) return; // unpositioned: skip 3D
+    const positioned = leaf.x !== null && leaf.x !== undefined;
+    const hasEstimate = !positioned && leaf.estimate && typeof leaf.estimate.x === 'number';
+    if (!positioned && !hasEstimate) return;  // nothing to render
     const entry = ensureLeafMesh(leaf, idx);
-    entry.sphere.position.set(leaf.x, leaf.z, leaf.y);
+    const x = positioned ? leaf.x : leaf.estimate.x;
+    const y = positioned ? leaf.y : leaf.estimate.y;
+    const z = positioned ? leaf.z : leaf.estimate.z;
+    entry.mesh.position.set(x, z, y);
+    // Style: solid when positioned, ghosted when only estimated.
+    entry.mesh.material.opacity = positioned ? 1.0 : 0.35;
+    entry.mesh.material.transparent = !positioned;
     const loc = leaf.location ? ` · ${leaf.location}` : '';
-    entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${loc}`;
+    const suffix = positioned ? loc : ' (estimated)';
+    entry.labelEl.textContent = `${leaf.leaf.replace('mockingbird-', '')}${suffix}`;
+    entry.labelEl.style.opacity = positioned ? 1 : 0.65;
+    entry.labelEl.style.borderStyle = positioned ? 'solid' : 'dashed';
   });
 }
 
 // ---- side panel ----
 const sideEl = document.getElementById('leaves');
+
+// Update the per-leaf RSSI stats line in a row. Pure DOM mutation — never
+// re-creates the row. Called both on initial render and on every poll.
+function updateLeafStats(rowEl, leaf) {
+  const host = rowEl.querySelector('[data-stats]');
+  if (!host) return;
+  const s = leaf.stats;
+  if (!s) {
+    host.innerHTML = leaf.online ? '<span style="color:#6b7280">no recent obs</span>' : '';
+    return;
+  }
+  // Map top RSSI to a 0–100% bar: -100dBm → 0%, -20dBm → 100%
+  const pct = Math.max(0, Math.min(100, ((s.top_rssi + 100) / 80) * 100));
+  host.innerHTML = `
+    <span title="distinct MACs seen in last 20s">${s.n_devices}d</span>
+    <span title="strongest single observation">top ${s.top_rssi}</span>
+    <span title="median per-MAC strongest RSSI">med ${s.median_rssi} dBm</span>
+    <div class="stat-bar" style="--strength:${pct.toFixed(0)}%" title="top RSSI strength"></div>
+  `;
+}
+
+// Render or update the "≈ (x, y, z)" estimate hint + "use estimate" button
+// for an unpositioned leaf. Idempotent — safe to call every poll.
+function updateLeafEstimate(rowEl, leaf) {
+  const host = rowEl.querySelector('[data-estimate-host]');
+  if (!host) return;
+  const positioned = leaf.x !== null && leaf.x !== undefined;
+  if (positioned || !leaf.estimate) {
+    host.innerHTML = '';
+    return;
+  }
+  const e = leaf.estimate;
+  host.innerHTML = `
+    <div class="leaf-estimate">
+      <div>
+        <div class="est-coords">≈ (${e.x}, ${e.y}, ${e.z}) m</div>
+        <div class="est-meta">RSSI estimate from ${e.n_devices} devices</div>
+      </div>
+      <button class="use-est">use →</button>
+    </div>
+  `;
+  host.querySelector('button.use-est').addEventListener('click', async () => {
+    // Fill the row's x/y/z inputs and POST — triggers existing autoSave path
+    // but skipping the debounce since this is a deliberate user action.
+    const inputs = rowEl.querySelectorAll('input[type="number"]');
+    if (inputs.length < 3) return;
+    inputs[0].value = e.x; inputs[1].value = e.y; inputs[2].value = e.z;
+    try {
+      const r = await fetch('/api/leaves', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leaf: leaf.leaf, x: e.x, y: e.y, z: e.z }),
+      });
+      if (r.ok) {
+        toast(`${leaf.leaf.replace('mockingbird-','')} ← estimate (${e.x}, ${e.y}, ${e.z})`);
+        refresh({ force: true });
+      } else {
+        toast('save failed: ' + (await r.text()), 'err');
+      }
+    } catch (err) { toast('network error: ' + err.message, 'err'); }
+  });
+}
 
 const renderedLeaves = new Set();  // names already rendered into the side panel
 let firstRender = true;
@@ -409,8 +2064,9 @@ function renderSide(leaves, { force = false } = {}) {
     return;
   }
   firstRender = false;
-  // Update existing rows' read-only bits (status / location) without touching inputs.
-  // Render fully only for leaves that don't have a row yet.
+  // Update existing rows' read-only bits (status / location / stats / estimate)
+  // without touching inputs. Render fully only for leaves that don't have a
+  // row yet — preserves any in-progress typing in the x/y/z inputs.
   for (const leaf of leaves) {
     const existing = document.querySelector(`[data-leaf-row="${leaf.leaf}"]`);
     if (existing) {
@@ -419,8 +2075,10 @@ function renderSide(leaves, { force = false } = {}) {
       if (loc) loc.textContent = leaf.location || '';
       if (status) {
         const pos = leaf.x !== null && leaf.x !== undefined;
-        status.textContent = `${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}`;
+        status.textContent = `${pos ? 'positioned' : 'no position yet'} ${leaf.online ? '· online' : '· offline'}`;
       }
+      updateLeafStats(existing, leaf);
+      updateLeafEstimate(existing, leaf);
     }
   }
   leaves.forEach((leaf, idx) => {
@@ -436,16 +2094,20 @@ function renderSide(leaves, { force = false } = {}) {
         <div class="leaf-name"><span class="leaf-dot" style="background:${colorHex}"></span>${leaf.leaf.replace('mockingbird-', '')}</div>
         <div class="leaf-loc">${leaf.location || ''}</div>
       </div>
-      <div class="leaf-status">${pos ? 'positioned' : 'no position yet'} ${leaf.last_seen ? '· online' : ''}</div>
+      <div class="leaf-status">${pos ? 'positioned' : 'no position yet'} ${leaf.online ? '· online' : '· offline'}</div>
+      <div class="leaf-stats" data-stats></div>
       <div class="row">
         <input type="number" step="0.01" name="x" placeholder="x" value="${pos ? leaf.x : ''}">
         <input type="number" step="0.01" name="y" placeholder="y" value="${pos ? leaf.y : ''}">
         <input type="number" step="0.01" name="z" placeholder="z" value="${pos ? leaf.z : ''}">
       </div>
+      <div data-estimate-host></div>
       <input type="text" name="notes" placeholder="notes (optional)" value="${leaf.notes || ''}" style="margin-top:6px">
       ${pos ? `<button class="ghost" data-clear="${leaf.leaf}">clear position</button>` : ''}
     `;
     sideEl.appendChild(div);
+    updateLeafStats(div, leaf);
+    updateLeafEstimate(div, leaf);
 
     // Debounced auto-save on any input change in this row.
     const inputs = div.querySelectorAll('input');
@@ -459,9 +2121,9 @@ function renderSide(leaves, { force = false } = {}) {
           body: JSON.stringify({ leaf: leaf.leaf, x, y, z, notes }),
         });
         if (r.ok) {
-          // Optimistic 3D update: move the sphere immediately, no re-render.
+          // Optimistic 3D update: move the diamond immediately, no re-render.
           const entry = ensureLeafMesh(leaf, idx);
-          entry.sphere.position.set(x, z, y);
+          entry.mesh.position.set(x, z, y);
           // Make the status pill say "positioned" if it wasn't already
           const status = div.querySelector('.leaf-status');
           if (status) status.textContent = `positioned · ${leaf.location ? 'online' : 'online'}`;
@@ -492,6 +2154,7 @@ function renderSide(leaves, { force = false } = {}) {
 
 let roomFormHydrated = false;  // input fields only set on first load + after save
 async function refreshRoom({ syncForm = false } = {}) {
+  startFetch();
   try {
     const r = await fetch('/api/room').then(r => r.json());
     // 3D scene updates always (these don't touch inputs)
@@ -510,9 +2173,11 @@ async function refreshRoom({ syncForm = false } = {}) {
       document.getElementById('room-h').value     = r.height ?? '';
       document.getElementById('room-notes').value = r.notes ?? '';
       document.getElementById('room-north').value = r.north_deg ?? 0;
+      document.getElementById('room-ground-floor').checked = !!r.is_ground_floor;
       roomFormHydrated = true;
     }
   } catch (e) { console.error(e); }
+  finally { endFetch(); }
 }
 
 const roomAutoSave = debounce(async () => {
@@ -521,19 +2186,18 @@ const roomAutoSave = debounce(async () => {
   const h = parseFloat(document.getElementById('room-h').value);
   const north_deg = parseFloat(document.getElementById('room-north').value) || 0;
   const notes = document.getElementById('room-notes').value;
-  // Silently skip incomplete entries — user is still typing
+  const is_ground_floor = document.getElementById('room-ground-floor').checked;
   if ([w, d, h].some(v => Number.isNaN(v) || v <= 0)) return;
   try {
     const r = await fetch('/api/room', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes }),
+      body: JSON.stringify({ width: w, depth: d, height: h, north_deg, notes, is_ground_floor }),
     });
     if (r.ok) {
-      // Soft refresh: only the 3D scene + north arrow, keep form values.
       const fresh = await r.json();
       rebuildRoom(fresh.width, fresh.depth, fresh.height);
       setNorthRotation(fresh.north_deg || 0);
-      toast(`room ${w}×${d}×${h} m · N=${north_deg}°`);
+      toast(`room ${w}×${d}×${h} m · N=${north_deg}°${fresh.is_ground_floor ? ' · ground floor' : ''}`);
     } else {
       toast('save failed: ' + (await r.text()), 'err');
     }
@@ -543,14 +2207,24 @@ const roomAutoSave = debounce(async () => {
 for (const id of ['room-w', 'room-d', 'room-h', 'room-north', 'room-notes']) {
   document.getElementById(id).addEventListener('input', roomAutoSave);
 }
+document.getElementById('room-ground-floor').addEventListener('change', roomAutoSave);
 
 async function refresh({ force = false } = {}) {
+  startFetch();
   try {
     const leaves = await fetch('/api/leaves').then(r => r.json());
     renderLeaves(leaves);
     renderSide(leaves, { force });
+    if (!_firstLeavesIn) {
+      _firstLeavesIn = true;
+      setLoaderStage('ready');
+      maybeDismissLoader();
+    }
   } catch (e) {
     console.error(e);
+    if (!_firstLeavesIn) setLoaderStage('error — retrying…');
+  } finally {
+    endFetch();
   }
 }
 
@@ -558,6 +2232,944 @@ refresh();
 refreshRoom();
 setInterval(refresh, 5000);
 setInterval(refreshRoom, 8000);
+
+// ---- tabs + live polling ----
+let liveTimer = null;
+const livePulse = document.getElementById('live-pulse');
+const liveCountEl = document.getElementById('live-count');
+const liveAsofEl = document.getElementById('live-asof');
+const liveListEl = document.getElementById('live-list');
+
+let _liveFirstPollDone = false;
+const liveRowByTrack = new Map();  // track_id → row <div> in the sidebar
+const liveEntityRowByID = new Map();  // entity_id → row <div>
+
+function ensureEntityRow(e) {
+  let row = liveEntityRowByID.get(e.entity_id);
+  if (!row) {
+    const col = '#' + trackColor(e.entity_id).getHexString();
+    const name = getEntityName(e.entity_id, e.entity_name);
+    row = document.createElement('div');
+    row.className = 'dev-row fadein' + (isEntityNamed(e.entity_id) ? ' named' : '');
+    row.dataset.entity = e.entity_id;
+    row.title = `entity ${e.entity_id}\n${e.n_tracks} tracks, ${e.n_tracks_used} fused`;
+    row.innerHTML = `
+      <span class="dev-dot" style="background:${col}; width:10px; height:10px"></span>
+      <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
+      <span class="dev-rssi"></span>
+      <span class="dev-n"></span>
+    `;
+    const inp = row.querySelector('input.dev-name');
+    inp.addEventListener('click', ev => ev.stopPropagation());
+    const save = debounce(() => {
+      const v = inp.value.trim();
+      setEntityName(e.entity_id, v);
+      row.classList.toggle('named', isEntityNamed(e.entity_id));
+      if (!v) inp.value = getEntityName(e.entity_id, e.entity_name);
+      // Refresh 3D label immediately for this entity
+      const overlay = entityByID.get(e.entity_id);
+      if (overlay) {
+        overlay.labelEl.textContent = getEntityName(e.entity_id, e.entity_name) +
+          ` · ${overlay.lastEntity ? overlay.lastEntity.n_tracks : '?'} tracks`;
+      }
+      toast(`entity named "${v || '(reset)'}"`, 'ok');
+    }, 350);
+    inp.addEventListener('input', save);
+    inp.addEventListener('blur', save);
+    // Click anywhere on the row (except the input) → focus this entity
+    row.addEventListener('click', (ev) => {
+      if (ev.target.tagName === 'INPUT') return;
+      setFocused(e.entity_id, 'entity');
+    });
+    row.style.cursor = 'pointer';
+    document.getElementById('live-entity-list').appendChild(row);
+    liveEntityRowByID.set(e.entity_id, row);
+  }
+  // Refresh per-tick text bits (NEVER touch the input)
+  const cov = e.cov || [[0,0,0]]*3;
+  const sigma = Math.sqrt(Math.max(0, (cov[0][0] + cov[1][1] + cov[2][2]) / 3));
+  row.querySelector('.dev-rssi').textContent = `σ=${(sigma*100).toFixed(0)}cm`;
+  row.querySelector('.dev-n').textContent = `${e.n_tracks}T`;
+  return row;
+}
+
+function ensureLiveRow(d) {
+  let row = liveRowByTrack.get(d.track_id);
+  if (!row) {
+    const col = '#' + trackColor(d.track_id).getHexString();
+    const name = getName(d);  // server track_name unless user has overridden
+    const macList = (d.track_macs || [d.mac]).join('\n');
+    row = document.createElement('div');
+    row.className = 'dev-row fadein' + (isUserNamed(d.track_id) ? ' named' : '');
+    row.dataset.track = d.track_id;
+    row.title = `track ${d.track_id}\nMACs (${(d.track_macs || []).length}):\n${macList}`;
+    row.innerHTML = `
+      <span class="dev-dot" style="background:${col}"></span>
+      <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
+      <span class="dev-rssi"></span>
+      <span class="dev-n"></span>
+    `;
+    const inp = row.querySelector('input.dev-name');
+    inp.addEventListener('click', e => e.stopPropagation());
+    const save = debounce(() => {
+      const v = inp.value.trim();
+      setName(d.track_id, v);
+      row.classList.toggle('named', isUserNamed(d.track_id));
+      if (!v) inp.value = getName(d);  // empty → fall back to server name
+      refreshDeviceLabels();
+    }, 350);
+    inp.addEventListener('input', save);
+    inp.addEventListener('blur', save);
+    liveListEl.appendChild(row);
+    liveRowByTrack.set(d.track_id, row);
+  }
+  // Update read-only bits without touching the name input.
+  row.querySelector('.dev-rssi').textContent = `${d.rssi_max} dBm`;
+  const nMacs = (d.track_macs || []).length;
+  row.querySelector('.dev-n').textContent = nMacs > 1 ? `${nMacs}×` : `${d.n_leaves}L`;
+  // Keep hover tooltip fresh as MACs accumulate
+  row.title = `track ${d.track_id}\nMACs (${nMacs}):\n${(d.track_macs || []).join('\n')}`;
+  return row;
+}
+
+async function pollLive() {
+  startFetch();
+  try {
+    const r = await fetch('/api/live').then(r => r.json());
+    applyLiveDevices(r.devices || [], r.entities || []);
+    // New data may have moved spheres / spawned tracks — keep the render
+    // loop at 60fps long enough for lerps and stale fades to settle.
+    if (typeof wake === 'function') wake(REMOVE_AFTER_MS);
+    // If a device is focused, refresh the floor heatmap + the badge.
+    if (focusedKey) {
+      rebuildHeatmap();
+      setFocused(focusedKey, focusedKind);  // re-read fresh state for badge
+    }
+    // Render entity rows in sidebar (above the per-track list)
+    const entityListEl = document.getElementById('live-entity-list');
+    const seenEnt = new Set();
+    for (const e of (r.entities || [])) {
+      ensureEntityRow(e);
+      seenEnt.add(e.entity_id);
+    }
+    // Drop rows for entities that vanished
+    for (const [eid, row] of liveEntityRowByID) {
+      if (!seenEnt.has(eid)) { row.remove(); liveEntityRowByID.delete(eid); }
+    }
+    if (liveEntityRowByID.size === 0) {
+      if (!entityListEl.querySelector('.empty')) {
+        entityListEl.innerHTML = '<div class="empty" style="font-size:11px">no multi-track entities yet (need ≥2 tracks with similar RSSI fingerprints)</div>';
+      }
+    } else {
+      entityListEl.querySelector('.empty')?.remove();
+    }
+    const devs = r.devices || [];
+    liveCountEl.textContent = devs.length;
+    // Track freshness so the operator can tell at a glance when the
+    // displayed positions are minutes-old rather than 200ms-old. The
+    // age tick (below, every 500ms) updates the display continuously
+    // even when no new data has arrived.
+    _liveLastAsOf = (r.as_of || Date.now() / 1000) * 1000;
+    _liveLastSuccess = Date.now();
+    _liveFailStreak = 0;
+    _liveRenderFreshness();
+    // Positioning method breakdown
+    const methodEl = document.getElementById('live-method');
+    const methodDetail = document.getElementById('live-method-detail');
+    if (methodEl && methodDetail) {
+      const ml = devs.filter(d => d.pos_method === 'multilat').length;
+      const ct = devs.filter(d => d.pos_method === 'centroid').length;
+      const total = devs.length;
+      if (r.calibration) {
+        methodEl.textContent = `multilat ${ml}/${total}`;
+        methodDetail.textContent = `${ct} fallback to centroid · n=${r.calibration.n}`;
+      } else {
+        methodEl.textContent = 'centroid';
+        methodDetail.textContent = 'no calibration · run in Setup';
+      }
+    }
+    if (devs.length === 0) {
+      // Wipe rows + show empty note (no input to disturb).
+      for (const [tid, row] of liveRowByTrack) { row.remove(); }
+      liveRowByTrack.clear();
+      const note = r.note ? `<div class="empty">${r.note}</div>`
+                          : `<div class="empty">no Apple devices currently seen by ≥2 positioned leaves</div>`;
+      // Only set innerHTML if it's not already the empty message
+      if (!liveListEl.querySelector('.empty')) liveListEl.innerHTML = note;
+    } else {
+      // Strip any non-row content (like the empty-state note) on first device arrival
+      liveListEl.querySelectorAll(':scope > .empty, :scope > .live-loader').forEach(el => el.remove());
+      const seen = new Set(devs.map(d => d.track_id));
+      // Upsert in server order so RSSI-strongest stays near the top.
+      let cursor = null;
+      for (const d of devs) {
+        const row = ensureLiveRow(d);
+        const nextSibling = cursor ? cursor.nextSibling : liveListEl.firstChild;
+        if (row !== nextSibling) liveListEl.insertBefore(row, nextSibling);
+        cursor = row;
+      }
+      // Drop any row not seen this poll (track aged out on server).
+      for (const [tid, row] of liveRowByTrack) {
+        if (!seen.has(tid)) { row.remove(); liveRowByTrack.delete(tid); }
+      }
+    }
+    _liveFirstPollDone = true;
+  } catch (e) {
+    console.error('pollLive', e);
+    _liveFailStreak++;
+    _liveRenderFreshness();
+    if (!_liveFirstPollDone) {
+      liveListEl.innerHTML = '<div class="empty">poll failed — retrying…</div>';
+    }
+  } finally {
+    endFetch();
+  }
+}
+
+// ---- live freshness indicator ----
+// Three sources of truth communicated by one widget on the live-summary card:
+//   1. how old is the data we're showing? (Xs ago, color-shifted past thresholds)
+//   2. is the dashboard still successfully talking to the Pi? (3+ failures → banner)
+//   3. wall-clock time the data was generated (preserved in title=)
+// The widget redraws every 500 ms whether or not data has arrived; the moment
+// the server stops responding, the operator sees the number count up.
+let _liveLastAsOf = 0;       // ms since epoch, server's as_of
+let _liveLastSuccess = 0;    // ms since epoch, when we last got a 200
+let _liveFailStreak = 0;     // consecutive failed polls
+const LIVE_AGE_WARM_S = 4;       // amber after this much staleness
+const LIVE_AGE_STALE_S = 10;     // red after this much
+const LIVE_CONN_LOST_FAILS = 3;  // banner after this many consecutive failures
+function _liveRenderFreshness() {
+  if (!liveAsofEl) return;
+  // Connection lost takes over the slot entirely.
+  if (_liveFailStreak >= LIVE_CONN_LOST_FAILS) {
+    liveAsofEl.className = 'live-conn-lost';
+    liveAsofEl.textContent = `CONNECTION LOST · ${_liveFailStreak} failed polls`;
+    liveAsofEl.title = _liveLastAsOf
+      ? `last successful update: ${new Date(_liveLastAsOf).toTimeString().slice(0,8)}`
+      : 'no successful update yet';
+    return;
+  }
+  // No data yet — keep the placeholder quiet.
+  if (!_liveLastAsOf) {
+    liveAsofEl.className = 'live-asof';
+    liveAsofEl.textContent = '—';
+    liveAsofEl.title = '';
+    return;
+  }
+  const ageS = (Date.now() - _liveLastAsOf) / 1000;
+  let cls = 'live-asof';
+  if (ageS > LIVE_AGE_STALE_S)      cls += ' stale';
+  else if (ageS > LIVE_AGE_WARM_S)  cls += ' warm';
+  liveAsofEl.className = cls;
+  // Human-readable age. Sub-second feels fresh; whole-seconds otherwise.
+  const text = ageS < 1
+    ? 'just now'
+    : ageS < 60   ? `${ageS.toFixed(0)}s ago`
+    : ageS < 3600 ? `${Math.floor(ageS/60)}m ${Math.floor(ageS%60)}s ago`
+    :               `${Math.floor(ageS/3600)}h ago`;
+  liveAsofEl.textContent = text;
+  liveAsofEl.title = `data timestamp: ${new Date(_liveLastAsOf).toTimeString().slice(0,8)}`;
+}
+// Tick the freshness indicator independently of polling so the age counts
+// up smoothly even when a poll is in flight or has failed.
+setInterval(_liveRenderFreshness, 500);
+
+function setTab(name, { focus = false } = {}) {
+  document.querySelectorAll('.tab').forEach(t => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    t.setAttribute('tabindex', on ? '0' : '-1');
+    if (on && focus) t.focus();
+  });
+  document.querySelectorAll('.pane').forEach(p => {
+    const on = p.id === name + '-pane';
+    p.classList.toggle('active', on);
+    // hidden attribute + aria stays in sync with .active so AT and CSS agree.
+    if (on) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+  });
+  if (name === 'live') {
+    livePulse.style.display = 'inline-block';
+    if (!_liveFirstPollDone) {
+      liveRowByTrack.clear();
+      liveListEl.innerHTML = `
+        <div class="live-loader">
+          <div class="spinner"></div>
+          <div>polling for nearby devices…</div>
+        </div>`;
+    }
+    pollLive();
+    if (liveTimer == null) liveTimer = setInterval(pollLive, 500);
+  } else {
+    livePulse.style.display = 'none';
+    if (liveTimer != null) { clearInterval(liveTimer); liveTimer = null; }
+  }
+  if (name === 'stats') {
+    pollStats();
+    if (statsTimer == null) statsTimer = setInterval(pollStats, 3000);
+  } else {
+    if (statsTimer != null) { clearInterval(statsTimer); statsTimer = null; }
+  }
+}
+
+// ---- stats tab ----
+let statsTimer = null;
+function fmtUptime(s) {
+  if (!s || s < 0) return '—';
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h ${m}m`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m ${s % 60}s`;
+}
+function fmtBytes(b) {
+  if (b == null) return '—';
+  if (b >= 1024**3) return (b / 1024**3).toFixed(1) + ' GB';
+  if (b >= 1024**2) return (b / 1024**2).toFixed(1) + ' MB';
+  if (b >= 1024)    return (b / 1024).toFixed(1) + ' KB';
+  return b + ' B';
+}
+function fmtNum(n) { return n == null ? '—' : n.toLocaleString(); }
+function barClass(pct) { return pct > 90 ? 'err' : pct > 75 ? 'warn' : ''; }
+
+async function pollStats() {
+  try {
+    const r = await fetch('/api/system').then(r => r.json());
+    const pi = r.pi || {};
+    document.getElementById('pi-load').textContent = pi.load_avg ? pi.load_avg.map(x => x.toFixed(2)).join(' · ') : '—';
+    document.getElementById('pi-uptime').textContent = fmtUptime(pi.uptime_s);
+    if (pi.mem_total_kb && pi.mem_available_kb != null) {
+      const used = pi.mem_total_kb - pi.mem_available_kb;
+      document.getElementById('pi-mem').textContent =
+        `${(used/1024).toFixed(0)} / ${(pi.mem_total_kb/1024).toFixed(0)} MB (${pi.mem_used_pct}%)`;
+      const bar = document.getElementById('pi-mem-bar');
+      bar.style.width = pi.mem_used_pct + '%';
+      bar.className = 'stat-bar-fill ' + barClass(pi.mem_used_pct);
+    }
+    if (pi.disk_total_gb != null) {
+      document.getElementById('pi-disk').textContent =
+        `${(pi.disk_total_gb - pi.disk_free_gb).toFixed(1)} / ${pi.disk_total_gb} GB (${pi.disk_used_pct}%)`;
+      const bar = document.getElementById('pi-disk-bar');
+      bar.style.width = pi.disk_used_pct + '%';
+      bar.className = 'stat-bar-fill ' + barClass(pi.disk_used_pct);
+    }
+    document.getElementById('pi-db').textContent = pi.db_size_mb != null ? pi.db_size_mb + ' MB' : '—';
+    const totalObs = (r.leaves || []).reduce((s, L) => s + (L.obs_per_s || 0), 0);
+    document.getElementById('pi-obs-rate').textContent = `${totalObs.toFixed(1)} obs/s across ${(r.leaves || []).length} leaves`;
+    // Leaf rows — incremental upsert keyed by leaf name
+    const host = document.getElementById('leaf-stats');
+    host.innerHTML = '';
+    for (const L of r.leaves || []) {
+      const status = L.status || 'ok';
+      const obsCls = L.obs_per_s > 5 ? 'ok' : L.obs_per_s > 0 ? '' : 'err';
+      const dropPct = L.n_sent ? Math.round(100 * L.n_dropped / (L.n_sent + L.n_dropped)) : 0;
+      const dropCls = dropPct > 30 ? 'err' : dropPct > 10 ? 'stale' : '';
+      const qCls = L.q_depth === 64 ? 'err' : L.q_depth >= 32 ? 'stale' : '';
+      const ageDisplay = L.hb_age_s == null ? 'never' :
+        L.hb_age_s > 3600 ? `${Math.floor(L.hb_age_s/3600)}h ${Math.floor(L.hb_age_s/60)%60}m ago` :
+        L.hb_age_s > 120  ? `${Math.floor(L.hb_age_s/60)}m ago` :
+        `${L.hb_age_s.toFixed(0)}s ago`;
+      const ageCls = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
+      const row = document.createElement('div');
+      row.className = 'leaf-stat-row ' + (status === 'offline' ? 'is-offline' :
+                                          status === 'stale'   ? 'is-stale'   :
+                                                                 'is-ok');
+      // Status word is shown on EVERY row (not just stale/offline) so the
+      // column reads uniformly — and so OK isn't signaled by color alone.
+      const tagCls   = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
+      const tagLabel = status === 'offline' ? 'OFFLINE' : status === 'stale' ? 'STALE' : 'OK';
+      const tag = `<span class="${tagCls}" style="font-size:9px; text-transform:uppercase; font-weight:600">${tagLabel}</span>`;
+      // aria-label on the dot so screen-readers get the status; the shape
+      // (circle/triangle/square via clip-path) gives the same info visually
+      // to colorblind operators.
+      row.innerHTML = `
+        <div class="lname">
+          <span class="status-dot" role="img" aria-label="${tagLabel.toLowerCase()}"></span>
+          <span>${L.leaf.replace('mockingbird-', '')}</span>
+        </div>
+        <div>
+          ${L.uptime_s ? fmtUptime(L.uptime_s) : '<span class="err">no telemetry</span>'}<br>
+          <span class="${ageCls}" style="font-size:10px">${tag} hb ${ageDisplay}</span>
+        </div>
+        <div>
+          <span class="${obsCls}">${L.obs_per_s.toFixed(1)}/s</span><br>
+          <span style="font-size:10px; color:#6b7280">
+            sent ${fmtNum(L.n_sent)} · <span class="${dropCls}">drop ${fmtNum(L.n_dropped)} (${dropPct}%)</span>
+          </span>
+        </div>
+        <div>
+          ${L.wifi_rssi != null ? L.wifi_rssi + ' dBm' : '—'}<br>
+          <span style="font-size:10px; color:#6b7280">
+            heap ${fmtBytes(L.heap_free)} · <span class="${qCls}">q=${L.q_depth ?? '—'}</span>
+          </span>
+        </div>
+      `;
+      host.appendChild(row);
+    }
+    if ((r.leaves || []).length === 0) {
+      host.innerHTML = '<div class="empty" style="padding:12px 0; color:#6b7280; font-style:italic">no leaves heard from in 5 min</div>';
+    }
+  } catch (e) {
+    console.error('pollStats', e);
+  }
+}
+// Tabs are keyboard-navigable per the WAI-ARIA tabs pattern:
+//   ←/→ : move focus + activate prev/next tab
+//   Home/End : move to first/last
+//   Enter/Space : activate the focused tab (also handled by click)
+// We use "activate-on-focus" because the panes are cheap to swap and an
+// operator skimming with arrow keys benefits from seeing each tab's content.
+const _tabEls = Array.from(document.querySelectorAll('.tab'));
+_tabEls.forEach((t, i) => {
+  t.addEventListener('click', () => setTab(t.dataset.tab));
+  t.addEventListener('keydown', (ev) => {
+    let nextIdx = null;
+    switch (ev.key) {
+      case 'ArrowRight': nextIdx = (i + 1) % _tabEls.length; break;
+      case 'ArrowLeft':  nextIdx = (i - 1 + _tabEls.length) % _tabEls.length; break;
+      case 'Home':       nextIdx = 0; break;
+      case 'End':        nextIdx = _tabEls.length - 1; break;
+      case 'Enter':
+      case ' ':          setTab(t.dataset.tab); ev.preventDefault(); return;
+      default: return;
+    }
+    ev.preventDefault();
+    setTab(_tabEls[nextIdx].dataset.tab, { focus: true });
+  });
+});
+
+// ---- path-loss calibration ----
+const calStatusEl = document.getElementById('cal-status');
+const calParamsEl = document.getElementById('cal-params');
+const calRunBtn = document.getElementById('cal-run');
+
+let _calAutoCollapsed = false;
+function renderCalibration(c) {
+  const det = document.getElementById('cal-details');
+  const stateEl = document.getElementById('cal-summary-state');
+  if (!c || !c.calibrated) {
+    calStatusEl.textContent = 'not calibrated yet — positions use weighted centroid';
+    calParamsEl.style.display = 'none';
+    if (stateEl) { stateEl.textContent = 'not calibrated'; stateEl.classList.remove('ok'); }
+    // Keep the section expanded — first-run operators need to see it.
+    return;
+  }
+  calStatusEl.textContent = `calibrated · ${c.n_points} fit points across ${c.n_devices} devices`;
+  calParamsEl.style.display = 'block';
+  calParamsEl.innerHTML =
+    `P<sub>0</sub> = <b>${c.p0}</b> dBm @ 1m &nbsp;·&nbsp; ` +
+    `n = <b>${c.n}</b> &nbsp;·&nbsp; ` +
+    `RMSE = <b>${c.rmse_dbm}</b> dB &nbsp;·&nbsp; ` +
+    `fit ${Math.round(c.fit_age_s || 0)}s ago`;
+  if (stateEl) {
+    stateEl.textContent = `fit · RMSE ${c.rmse_dbm} dB`;
+    stateEl.classList.add('ok');
+  }
+  // Once a fit exists, auto-collapse so leaves get the visual priority.
+  // Only do this on the first observation per page-load — never fight the
+  // user if they've opened it manually.
+  if (det && !_calAutoCollapsed) {
+    _calAutoCollapsed = true;
+    det.open = false;
+  }
+}
+
+async function refreshCalibration() {
+  try {
+    const r = await fetch('/api/calibration').then(r => r.json());
+    renderCalibration(r);
+  } catch (e) { /* swallow */ }
+}
+
+calRunBtn.addEventListener('click', async () => {
+  calRunBtn.disabled = true;
+  calRunBtn.textContent = 'fitting…';
+  try {
+    const r = await fetch('/api/calibrate', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'calibration failed', 'err');
+    } else {
+      renderCalibration({ ...j, fit_age_s: 0, calibrated: true });
+      toast(`calibrated · P₀=${j.p0} dBm, n=${j.n}, RMSE=${j.rmse_dbm} dB`);
+    }
+  } catch (e) {
+    toast('network error: ' + e.message, 'err');
+  } finally {
+    calRunBtn.disabled = false;
+    calRunBtn.textContent = 'recalibrate';
+  }
+});
+
+// Initial check on load, and re-check every 30s so the "fit age" updates.
+refreshCalibration();
+setInterval(refreshCalibration, 30000);
+
+// ---- calibration anchor capture ----
+const calTrackSel = document.getElementById('cal-track-select');
+const calLeafSel  = document.getElementById('cal-leaf-select');
+const calXIn = document.getElementById('cal-x');
+const calYIn = document.getElementById('cal-y');
+const calZIn = document.getElementById('cal-z');
+const calLabel = document.getElementById('cal-label');
+const calCaptureBtn = document.getElementById('cal-capture');
+const calCaptureStatus = document.getElementById('cal-capture-status');
+const calAnchorList = document.getElementById('cal-anchor-list');
+
+// Build the leaf dropdown from /api/leaves; auto-fill x/y/z on selection.
+async function refreshCalLeafSelect() {
+  try {
+    const leaves = await fetch('/api/leaves').then(r => r.json());
+    const positioned = leaves.filter(L => L.x != null);
+    const cur = calLeafSel.value;
+    calLeafSel.innerHTML = '<option value="">— pick a leaf —</option>' +
+      positioned.map(L => {
+        const id = L.leaf.replace('mockingbird-', '');
+        const loc = L.location ? ` (${L.location})` : '';
+        return `<option value="${L.leaf}" data-x="${L.x}" data-y="${L.y}" data-z="${L.z}">at ${id}${loc} — (${L.x}, ${L.y}, ${L.z})</option>`;
+      }).join('');
+    if (cur) calLeafSel.value = cur;
+  } catch (e) { /* silent */ }
+}
+calLeafSel.addEventListener('change', () => {
+  const opt = calLeafSel.options[calLeafSel.selectedIndex];
+  if (opt && opt.dataset.x) {
+    calXIn.value = opt.dataset.x;
+    calYIn.value = opt.dataset.y;
+    calZIn.value = opt.dataset.z;
+  }
+});
+
+// Build the track dropdown from last /api/live snapshot in memory.
+function refreshCalTrackSelect() {
+  const cur = calTrackSel.value;
+  const opts = [...deviceByTrack.entries()]
+    .filter(([_tid, e]) => e.lastDevice)
+    .map(([tid, e]) => {
+      const d = e.lastDevice;
+      return `<option value="${d.mac}" data-tid="${tid}" data-name="${getName(d)}">${getName(d)} · ${d.mac.slice(-11)} · ${e.rssi} dBm</option>`;
+    });
+  calTrackSel.innerHTML = '<option value="">— pick a device —</option>' + opts.join('');
+  if (cur) calTrackSel.value = cur;
+}
+// Refresh dropdowns when the tab is opened + every 5s.
+setInterval(() => {
+  if (document.getElementById('setup-pane').classList.contains('active')) {
+    refreshCalLeafSelect();
+    refreshCalTrackSelect();
+    refreshCalAnchorList();
+  }
+}, 5000);
+refreshCalLeafSelect();
+refreshCalAnchorList();
+
+calCaptureBtn.addEventListener('click', async () => {
+  const mac = calTrackSel.value;
+  if (!mac) return toast('pick a device first', 'err');
+  const x = parseFloat(calXIn.value), y = parseFloat(calYIn.value), z = parseFloat(calZIn.value);
+  if ([x, y, z].some(v => Number.isNaN(v))) return toast('need x, y, z', 'err');
+  const opt = calTrackSel.options[calTrackSel.selectedIndex];
+  const body = {
+    mac, x, y, z,
+    duration_s: 20,
+    track_id: opt.dataset.tid || null,
+    track_name: opt.dataset.name || null,
+    label: calLabel.value || null,
+  };
+  calCaptureBtn.disabled = true;
+  calCaptureBtn.textContent = 'capturing…';
+  try {
+    const r = await fetch('/api/calibrate_at', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'capture failed', 'err');
+    } else {
+      toast(`capturing ${opt.dataset.name || mac.slice(-8)} at (${x},${y},${z}) for ${j.duration_s}s`);
+      // Progress UI
+      let elapsed = 0;
+      const tick = setInterval(() => {
+        elapsed += 1;
+        if (elapsed >= j.duration_s) {
+          clearInterval(tick);
+          calCaptureBtn.disabled = false;
+          calCaptureBtn.textContent = 'capture 20 s here';
+          calCaptureStatus.textContent = '✓ capture complete';
+          refreshCalAnchorList();
+          toast('anchor recorded — fit will use it next time you click refit', 'ok');
+          return;
+        }
+        calCaptureStatus.textContent = `recording… ${elapsed}/${j.duration_s}s`;
+      }, 1000);
+    }
+  } catch (e) {
+    toast('network: ' + e.message, 'err');
+    calCaptureBtn.disabled = false;
+    calCaptureBtn.textContent = 'capture 20 s here';
+  }
+});
+
+// ---- auto-detect phone wizard ----
+// User walks their phone to N different leaves, holds for 10s each.
+// Server scores each MAC by how many distinct leaves had that MAC in
+// its top-RSSI list during the corresponding window. The phone's MACs
+// score highest because they followed the user across leaves.
+const adWizard = document.getElementById('ad-wizard');
+const adStepText = document.getElementById('ad-step-text');
+const adLeafPick = document.getElementById('ad-leaf-pick');
+const adGo = document.getElementById('ad-go');
+const adProgress = document.getElementById('ad-progress');
+const adCancel = document.getElementById('ad-cancel');
+const adVisitsEl = document.getElementById('ad-visits');
+const adResultsEl = document.getElementById('ad-results');
+const AD_DURATION_S = 10;
+const AD_NUM_VISITS = 4;
+let adVisits = [];
+let adActive = false;
+
+function adRefreshLeafPick() {
+  // Same content as the calibration leaf-pick but excluding leaves already visited.
+  fetch('/api/leaves').then(r => r.json()).then(leaves => {
+    const positioned = leaves.filter(L => L.x != null);
+    const visitedLeaves = new Set(adVisits.map(v => v.leaf));
+    adLeafPick.innerHTML = positioned.map(L => {
+      const id = L.leaf.replace('mockingbird-', '');
+      const loc = L.location ? ` (${L.location})` : '';
+      const visited = visitedLeaves.has(L.leaf);
+      return `<option value="${L.leaf}" ${visited ? 'disabled' : ''}>at ${id}${loc}${visited ? ' ✓' : ''}</option>`;
+    }).join('');
+  });
+}
+function adRefreshVisits() {
+  if (!adVisits.length) {
+    adVisitsEl.textContent = '';
+    return;
+  }
+  adVisitsEl.innerHTML = adVisits.map((v, i) =>
+    `  visit ${i+1}: ${v.leaf.replace('mockingbird-','')} (${Math.round(v.ts_end - v.ts_start)}s)`
+  ).join('<br>');
+}
+function adSetStep(n) {
+  if (n > AD_NUM_VISITS) {
+    adStepText.textContent = `done — ${AD_NUM_VISITS} visits captured. Hit "Identify" to analyze.`;
+    adGo.textContent = 'Identify phone';
+    adGo.dataset.action = 'identify';
+  } else {
+    adStepText.textContent = `step ${n}/${AD_NUM_VISITS}: pick a leaf, place phone right against it, click Go`;
+    adGo.textContent = `Go (${AD_DURATION_S}s)`;
+    adGo.dataset.action = 'record';
+    adRefreshLeafPick();
+  }
+}
+
+document.getElementById('ad-start').addEventListener('click', () => {
+  adVisits = [];
+  adActive = true;
+  adWizard.style.display = 'block';
+  document.getElementById('ad-manual-panel').style.display = 'block';
+  document.getElementById('ad-voice-panel').style.display = 'none';
+  adResultsEl.innerHTML = '';
+  adRefreshVisits();
+  adSetStep(1);
+});
+
+// ---- voice-guided variant ----
+// Speech synthesis is available without install in all modern browsers.
+// The click on the start button is the user-gesture that unlocks audio
+// (required by browser autoplay policies); after that all speak()
+// calls work fine until the page reloads.
+let _adVoiceAborted = false;
+function adSpeak(text, subtitle) {
+  document.getElementById('ad-subtitle').textContent = subtitle ?? text;
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
+  window.speechSynthesis.cancel();   // drop any queued
+  window.speechSynthesis.speak(u);
+}
+async function adSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function adCountdown(seconds, label, withTicks = true) {
+  document.getElementById('ad-phase').textContent = label;
+  const big = document.getElementById('ad-big-countdown');
+  for (let i = seconds; i > 0; i--) {
+    if (_adVoiceAborted) return false;
+    big.textContent = i;
+    // Speak the last 3 ticks but not in-between to keep the room quiet
+    if (withTicks && i <= 3) adSpeak(String(i), label + ' · ' + i);
+    await adSleep(1000);
+  }
+  big.textContent = '0';
+  return true;
+}
+function adUpdateDots(done, total) {
+  const dots = Array.from({length: total}, (_, i) => i < done ? '●' : '○').join(' ');
+  document.getElementById('ad-dots').innerHTML =
+    dots.replace(/●/g, '<span style="color:#22c55e">●</span>')
+        .replace(/○/g, '<span style="color:#2a2e36">○</span>');
+}
+function adLeafName(L) {
+  return L.location && L.location.length
+    ? L.location
+    : 'leaf ' + L.leaf.slice(-6).replace(/(.)(.)(.)(.)(.)(.)/, '$1$2$3 $4$5$6');  // help TTS phrasing
+}
+
+document.getElementById('ad-voice-start').addEventListener('click', async () => {
+  // Pick leaves: positioned leaves, prefer ones with location labels.
+  const all = await fetch('/api/leaves').then(r => r.json());
+  const positioned = all.filter(L => L.x != null);
+  if (positioned.length < 2) return toast('need ≥2 positioned leaves', 'err');
+  positioned.sort((a, b) => {
+    if (!!a.location !== !!b.location) return a.location ? -1 : 1;
+    return (a.leaf || '').localeCompare(b.leaf || '');
+  });
+  const leaves = positioned.slice(0, Math.min(4, positioned.length));
+
+  adVisits = [];
+  adActive = true;
+  _adVoiceAborted = false;
+  adWizard.style.display = 'block';
+  document.getElementById('ad-manual-panel').style.display = 'none';
+  document.getElementById('ad-voice-panel').style.display = 'block';
+  adResultsEl.innerHTML = '';
+  adUpdateDots(0, leaves.length);
+
+  adSpeak(
+    `Starting auto-detect. You will visit ${leaves.length} leaves. ` +
+    `First one: ${adLeafName(leaves[0])}. Walk there now. You have ten seconds.`,
+    `walk to ${adLeafName(leaves[0])}`,
+  );
+  if (!await adCountdown(10, `walk to ${adLeafName(leaves[0])}`, false)) return adVoiceCancel();
+
+  for (let i = 0; i < leaves.length; i++) {
+    const L = leaves[i];
+    adSpeak(
+      `Place your phone against ${adLeafName(L)}. Recording for ten seconds.`,
+      `recording at ${adLeafName(L)}`,
+    );
+    const ts_start = Date.now() / 1000;
+    if (!await adCountdown(10, `recording at ${adLeafName(L)}`, true)) return adVoiceCancel();
+    const ts_end = Date.now() / 1000;
+    adVisits.push({ leaf: L.leaf, ts_start, ts_end });
+    adUpdateDots(i + 1, leaves.length);
+
+    if (i < leaves.length - 1) {
+      const next = leaves[i + 1];
+      adSpeak(
+        `Got it. Walk to ${adLeafName(next)}. You have ten seconds.`,
+        `walk to ${adLeafName(next)}`,
+      );
+      if (!await adCountdown(10, `walk to ${adLeafName(next)}`, false)) return adVoiceCancel();
+    }
+  }
+  adSpeak('All four visits recorded. Analyzing.', 'analyzing…');
+  document.getElementById('ad-big-countdown').textContent = '⌛';
+  document.getElementById('ad-phase').textContent = 'analyzing…';
+  await adIdentify();
+});
+
+function adVoiceCancel() {
+  _adVoiceAborted = true;
+  window.speechSynthesis?.cancel();
+  document.getElementById('ad-phase').textContent = 'cancelled';
+  document.getElementById('ad-big-countdown').textContent = '—';
+}
+adCancel.addEventListener('click', () => {
+  adActive = false;
+  _adVoiceAborted = true;
+  window.speechSynthesis?.cancel();
+  adWizard.style.display = 'none';
+  adVisits = [];
+});
+adGo.addEventListener('click', async () => {
+  if (adGo.dataset.action === 'identify') return adIdentify();
+  const leaf = adLeafPick.value;
+  if (!leaf) return toast('pick a leaf first', 'err');
+  adGo.disabled = true;
+  const ts_start = Date.now() / 1000;
+  // 10s recording, server doesn't need to know — we send the window after.
+  for (let s = AD_DURATION_S; s > 0; s--) {
+    adProgress.textContent = `recording… ${s}s`;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  const ts_end = Date.now() / 1000;
+  adProgress.textContent = '';
+  adVisits.push({ leaf, ts_start, ts_end });
+  adRefreshVisits();
+  adGo.disabled = false;
+  adSetStep(adVisits.length + 1);
+});
+
+async function adIdentify() {
+  adGo.disabled = true;
+  adGo.textContent = 'analyzing…';
+  try {
+    const r = await fetch('/api/autodetect_phone', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visits: adVisits }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      toast(j.error || 'analysis failed', 'err');
+      adGo.disabled = false;
+      adGo.textContent = 'Identify phone';
+      return;
+    }
+    const cands = j.candidates || [];
+    if (!cands.length) {
+      adResultsEl.innerHTML = '<div class="empty" style="font-size:11px">no candidates — try again, longer windows</div>';
+      adGo.disabled = false;
+      adGo.textContent = 'Identify phone';
+      return;
+    }
+    // Top candidates with action button. Highlight the top one prominently
+    // because that's almost always the right answer.
+    adResultsEl.innerHTML = `
+      <div class="leaf-status" style="margin-top: 12px; font-size: 12px; color: #cdd1d7; font-weight: 600">
+        ✓ candidates — top is your phone:
+      </div>
+      ${cands.slice(0, 6).map((c, i) => {
+        const isTop = i === 0;
+        return `
+        <div style="
+          background: ${isTop ? '#1a2230' : '#0c0d10'};
+          padding: 10px 12px;
+          margin-top: 6px;
+          border-radius: 6px;
+          border: ${isTop ? '2px solid #1d6fef' : '1px solid #232730'};
+          display: flex; gap: 8px; align-items: center; font-size: 11px;
+        ">
+          <span style="font-family: ui-monospace, monospace; color: #79c4ff; font-weight: ${isTop ? 700 : 400}; min-width: 95px">${c.mac.slice(-11)}</span>
+          <span style="flex: 1; color: #cdd1d7; font-weight: ${isTop ? 600 : 400}">${c.track_name || '(no current track)'}</span>
+          <span style="color: #6b7280; font-size: 10px">${c.n_distinct_leaves}/${j.n_visits} · ${c.best_rssi}dBm</span>
+          <button class="ad-pick" data-mac="${c.mac}" data-tid="${c.track_id || ''}" data-name="${c.track_name || ''}"
+            style="margin: 0; padding: 6px 14px; font-size: 12px; font-weight: 600; background: ${isTop ? '#1d6fef' : '#2a3340'}; color: white">
+            ${isTop ? '✓ use this' : 'use'}
+          </button>
+        </div>`;
+      }).join('')}
+    `;
+    // Scroll results into view (especially needed in voice mode where the
+    // user may have been watching the 3D scene, not the side panel).
+    setTimeout(() => adResultsEl.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+    adResultsEl.querySelectorAll('.ad-pick').forEach(b => {
+      b.addEventListener('click', () => {
+        // Force-add this MAC option into the cal-track-select even if no current track
+        const existing = Array.from(calTrackSel.options).find(o => o.value === b.dataset.mac);
+        if (!existing) {
+          const opt = document.createElement('option');
+          opt.value = b.dataset.mac;
+          opt.textContent = `${b.dataset.name || 'phone'} · ${b.dataset.mac.slice(-11)} (auto-detect)`;
+          opt.dataset.tid = b.dataset.tid || '';
+          opt.dataset.name = b.dataset.name || 'phone';
+          calTrackSel.appendChild(opt);
+        }
+        calTrackSel.value = b.dataset.mac;
+        toast(`phone identified: ${b.dataset.name || b.dataset.mac.slice(-11)}`, 'ok');
+        adWizard.style.display = 'none';
+        adActive = false;
+        adVisits = [];
+      });
+    });
+    // Re-enable button so user can re-run or click "use" buttons cleanly
+    adGo.disabled = false;
+    adGo.textContent = 'Identify phone (re-run)';
+    // If we were in voice mode, speak the top result so the user can
+    // confirm without looking at the screen.
+    if (document.getElementById('ad-voice-panel').style.display !== 'none') {
+      const top = cands[0];
+      const topName = top.track_name || ('mac ending ' + top.mac.slice(-5));
+      const others = cands.filter(c => c.n_distinct_leaves === top.n_distinct_leaves).length;
+      adSpeak(
+        `Done. Top candidate: ${topName}. ` +
+        (others > 1 ? `${others - 1} other candidates with equal score. ` : '') +
+        `Tap use on the screen to confirm.`,
+        `top: ${topName}`,
+      );
+      document.getElementById('ad-big-countdown').textContent = '✓';
+      document.getElementById('ad-phase').textContent = 'done';
+    }
+  } catch (e) {
+    toast('network: ' + e.message, 'err');
+    adGo.disabled = false;
+    adGo.textContent = 'Identify phone';
+  }
+}
+
+async function refreshCalAnchorList() {
+  try {
+    const r = await fetch('/api/calibration_points').then(r => r.json());
+    const pts = r.points || [];
+    if (!pts.length) {
+      calAnchorList.innerHTML = '<div class="empty" style="font-size:11px">no anchors yet — capture one above</div>';
+      return;
+    }
+    calAnchorList.innerHTML = `
+      <div class="leaf-status" style="margin-top: 8px">${pts.length} anchor point${pts.length===1?'':'s'} recorded</div>
+      ${pts.map(p => `
+        <div class="leaf" style="padding: 6px 10px; margin-bottom: 4px; font-size: 11px; display: flex; align-items: center; gap: 8px">
+          <span style="font-family: ui-monospace, monospace; color:#79c4ff">(${p.x}, ${p.y}, ${p.z})</span>
+          <span style="color: #6b7280">${p.track_name || p.mac.slice(-11)}</span>
+          <span style="flex: 1; color: #6b7280">${p.label || ''}</span>
+          ${p.in_progress
+            ? `<span class="stale" style="font-size:10px">${Math.round(p.duration_s - p.elapsed_s)}s left</span>`
+            : `<button class="ghost" data-cal-del="${p.id}" style="margin:0;padding:2px 8px;font-size:10px">×</button>`}
+        </div>
+      `).join('')}
+    `;
+    calAnchorList.querySelectorAll('[data-cal-del]').forEach(b =>
+      b.addEventListener('click', async () => {
+        await fetch('/api/calibration_points/' + b.dataset.calDel, { method: 'DELETE' });
+        refreshCalAnchorList();
+        toast('anchor deleted', 'warn');
+      }));
+  } catch (e) { /* silent */ }
+}
+
+// ---- view controls (camera mode + snap views) ----
+document.querySelectorAll('#view-controls [data-cam]').forEach(b => {
+  b.addEventListener('click', () => setCameraMode(b.dataset.cam));
+});
+document.querySelectorAll('#view-controls [data-view]').forEach(b => {
+  b.addEventListener('click', () => snapView(b.dataset.view));
+});
+
+// ---- live-pane toolbar wiring ----
+const showAllEl = document.getElementById('opt-show-all-labels');
+showAllEl.checked = showAllLabels;
+showAllEl.addEventListener('change', () => {
+  showAllLabels = showAllEl.checked;
+  localStorage.setItem(SHOW_ALL_KEY, String(showAllLabels));
+  refreshDeviceLabels();
+  toast(showAllLabels ? 'showing all device labels' : 'showing only named devices');
+});
+const ellipsoidEl = document.getElementById('opt-show-ellipsoids');
+ellipsoidEl.checked = showEllipsoids;
+ellipsoidEl.addEventListener('change', () => {
+  showEllipsoids = ellipsoidEl.checked;
+  localStorage.setItem(ELLIPSOID_KEY, String(showEllipsoids));
+  toast(showEllipsoids ? 'σ ellipsoids on' : 'σ ellipsoids off');
+});
+document.getElementById('opt-clear-names').addEventListener('click', () => {
+  const n = Object.keys(macNames).length;
+  if (!n) return toast('no overrides to reset', 'warn');
+  if (!confirm(`reset ${n} manual name override${n === 1 ? '' : 's'}?`)) return;
+  macNames = {};
+  localStorage.setItem(NAMES_KEY, '{}');
+  // Snap sidebar inputs back to their auto-names.
+  liveListEl.querySelectorAll('.dev-row').forEach(row => {
+    const inp = row.querySelector('input.dev-name');
+    const tid = row.dataset.track;
+    // Re-derive name from the last device payload we saw for this track
+    // — we don't have it cached client-side, so fall back to autoName.
+    if (inp && tid) inp.value = autoName(tid);
+    row.classList.remove('named');
+  });
+  refreshDeviceLabels();
+  toast(`reset ${n} override${n === 1 ? '' : 's'}`, 'warn');
+});
 </script>
 </body>
 </html>

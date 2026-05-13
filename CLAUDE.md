@@ -21,15 +21,21 @@ Noah already has on his desk:
   controllers). A "leaf" is a logical role, not necessarily one board —
   see "Node patterns" below.
 
-First planned capability: **distributed BLE sensing** (cluster of ESP32s
-scanning advertisements, Pi aggregating + de-duping + RSSI-fusing).
-More capabilities to follow.
+**Shipped capability:** distributed BLE sensing — ESP32s scan
+advertisements, Pi aggregates + de-dupes + RSSI-fuses. Built on top of
+that: MLE multilateration with per-leaf TX/RX bias decomposition, Kalman
+fusion + entity clustering (rotating-MAC tracks merge into person-level
+identities), live Three.js web dashboard (`services/dashboard.html` /
+`mockingbird-dashboard.service` on `:8080`), motion detection, and
+auto-calibration. See `docs/roadmap.md` for what's shipped vs in-flight
+and `docs/prds/` for the next three Q3 capabilities.
 
 The repo started as `esp32-fw` (firmware-only) and was renamed to `mockingbird`
 when the scope expanded to include the Opal bridge and surrounding
-infrastructure. The original ESP32 firmware code is still in `main/` and
-remains the firmware story for *future* ESP32-S3 hardware — see "Why not
-Tailscale on each ESP32" below.
+infrastructure. **Live firmware lives at `firmware/esp32-wroom-mockingbird/`**
+(PlatformIO + Arduino + NimBLE-Arduino, targets plain ESP32-D0WD-V3). The
+original ESP-IDF tree in `main/` is unbuilt and reserved for *future*
+ESP32-S3 hardware — see "Why not Tailscale on each ESP32" below.
 
 ## Node patterns
 
@@ -129,16 +135,23 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 - Model: **Raspberry Pi Zero W Rev 1.1** (BCM2835, single-core ARMv6 @ 1 GHz,
   512 MB RAM, 2.4 GHz WiFi only — which is why `mockingbird` is on 2.4 GHz)
 - **NOT** a Zero 2 W — confirmed via `cat /proc/cpuinfo`
-- OS: Raspberry Pi OS Lite **armhf** Bookworm `6.12.75-1+rpt1` (2026-03-11
-  build, freshly flashed)
+- OS: **Raspbian GNU/Linux 13 (trixie)** armhf, kernel
+  `6.12.75+rpt-rpi-v6 #1 Raspbian 1:6.12.75-1+rpt1 (2026-03-11)`. Ships
+  OpenSSH `10.0p2 Raspbian-7+deb13u2` (so the SSH banner is *not*
+  Bookworm-shaped — useful for fingerprinting which host is actually
+  the Pi when probing the subnet). WiFi MAC is the canonical Pi
+  Foundation OUI `b8:27:eb:*` — locally-administered MACs on this
+  subnet are NOT the Pi.
 - SD card: 64 GB (originally read-only because of a stuck write-protect on
   the SD adapter — **the lock switch is now super-glued to the unlocked
   position**, so reflashing always works now)
 - Hostname: `raspberrypi` on the LAN, `mockingbird-pi` on the tailnet
-- LAN: `wlan0` on Mockingbird, `192.168.8.202/24` (DHCP — may renumber)
-- **Tailscale**: `mockingbird-pi` at `100.83.26.55` (IPv4) /
-  `fd7a:115c:a1e0::5838:1a37` (IPv6). Advertises `192.168.8.0/24`, route
-  approved at the control plane. IP forwarding live
+- LAN: `wlan0` on Mockingbird, `192.168.8.202/24` (DHCP — may renumber) <!-- VERIFY: Macca to either reserve DHCP lease on the Opal for the Pi's MAC, or move leaves to mDNS hostname `mockingbird-pi.local`; then change this to "static reservation" -->
+- **Tailscale**: `mockingbird-pi` at `100.73.232.63` (IPv4) /
+  `fd7a:115c:a1e0::4d38:e83f` (IPv6) — *verified 2026-05-13 after Pi
+  reflash to Trixie; the older `100.83.26.55` from the Bookworm install
+  is gone*. Advertises `192.168.8.0/24`, route approved at the control
+  plane (approval is sticky across reflashes). IP forwarding live
   (`net.ipv4.ip_forward=1`, persisted in `/etc/sysctl.d/99-tailscale.conf`).
 - Reach paths (preferred → fallback):
   1. Tailscale (works from anywhere): `ssh pi@mockingbird-pi`
@@ -148,7 +161,7 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
      reliably exposes CDC ACM serial, less reliably CDC ECM ethernet
 - 16 GB SD card from the original Bullseye-era install is set aside as
   backup (has `g_ether` gadget — Mac-incompatible — and no WiFi). 64 GB
-  card is the primary.
+  card is the primary. <!-- VERIFY: Noah to confirm the 16 GB card still exists on the shelf and is worth keeping now that the 64 GB has months of state -->
 
 ### Noah's Mac (the dev box)
 - macOS Sequoia (Darwin 24.6.0), Apple Silicon
@@ -156,10 +169,50 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
 - Tailscale: installed and authenticated. Now sees `mockingbird-pi` as a peer
   with `192.168.8.0/24` subnet route. Mac is currently on Mockingbird so it
   reaches `192.168.8.x` directly via LAN, not through the tailnet route —
-  the route is for OTHER tailnet peers (phone, Windows server, etc.).
+  the route is for OTHER tailnet peers (phone, Windows server, `svr`, etc.).
 - `gh` authenticated as `noahjohnson0` (active) and `hopeharbor0`
 - ESP-IDF: **not installed** — would need it for the ESP32-S3 firmware
   path. PlatformIO (`pio`) is installed and used by `~/repos/esp32_demo`.
+
+### `svr` — Noah's gaming PC (GPU compute resource)
+Windows desktop, **RTX 4070 (12 GB VRAM)**, hostname `svr` on tailnet
+(`100.82.67.47`), LAN IP on entropy at `192.168.0.117`. SSH user is
+`noahj`; default shell is PowerShell (use `;` not `&&` for compound
+commands). OpenSSH Server is enabled and firewalled-allowed inbound.
+
+Reach paths (preferred → fallback):
+1. `ssh noahj@svr` (via tailnet hostname; MagicDNS resolves `svr` →
+   `100.82.67.47`). Works from anywhere on the tailnet — Mac on
+   Mockingbird, Mac on entropy, phone over LTE, etc. NAT-traversal is
+   reliable; direct UDP path from Mockingbird measures ~12 ms.
+2. `ssh noahj@192.168.0.117` (direct LAN, only when Mac is on
+   entropy-5G — same subnet as svr).
+3. `ssh noahj@svr.local` (mDNS, only on the entropy subnet).
+
+Use cases:
+- **GPU-bound ML training** — fingerprinting model training, BLE-RSSI →
+  motion classifier training, future audio/MEMS classifier work.
+- **Batch EDA on large DB snapshots** — pull `observations.sqlite` to
+  `svr`, run `scripts/eda/` against it without thrashing the Pi.
+- **Firmware builds at speed** — `pio` cross-compiles instantly vs.
+  minutes on the Pi.
+- **Embarrassingly parallel** — Monte Carlo for Eszter's MLE bias
+  studies, parameter sweeps.
+
+Tailscale hygiene (fixed 2026-05-13 — see Gotchas):
+- Service `Tailscale` is **StartType: Automatic** and `--unattended` is
+  set, so the daemon comes up and authenticates **without a logged-in
+  user session**. Survives reboot and logout.
+- Windows Firewall has Tailscale-Process + Tailscale-In inbound Allow
+  rules (auto-installed by the Tailscale MSI).
+- `tailscale ping svr` from the Mac on Mockingbird returns ~12 ms via
+  direct UDP (NAT-traversed through the Opal).
+
+Treat as ephemeral compute, not durable storage — anything we care
+about keeping lives on the Pi or in the repo. `lemon-squeezer` (the
+local-LLM benchmark project at `~/repos/lemon-squeezer`) uses svr via
+`OLLAMA_API_BASE=http://svr:11434` and `SAMPLER_SSH_TARGET=noahj@svr`
+in `~/.config/lemon-squeezer.env` — also tailnet-name addressing.
 
 ## Credentials & secrets
 
@@ -171,7 +224,7 @@ All in `~/repos/.scratch/` (outside the repo, gitignored anyway):
 | `wifi.txt` (0600) | `entropy` / WiFi PSK (used as upstream-WAN for Opal) |
 | `mockingbird-wifi.txt` (0600) | `Mockingbird` SSID + auto-generated PSK (the mockingbird LAN) |
 | `glinet-creds.txt` (0600) | Opal admin password |
-| `tailscale-authkey` (0600) | (empty/unused — we authed the Pi via interactive URL instead) |
+<!-- VERIFY: Noah to delete `~/repos/.scratch/tailscale-authkey` (empty/unused) and remove this row entirely. Leaving here until physical-file deletion is confirmed. -->
 | `flash-pi.sh` | one-shot flasher for the Pi's SD card |
 | `install-tailscale-on-router.sh` | abandoned — won't fit; kept as a reference of the wrong approach |
 | `sd-setup.sh` | SD card config-only edit script (legacy, kept for reference) |
@@ -238,6 +291,33 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 
 ## Gotchas learned (the hard way)
 
+- **Pi Zero W on Bookworm/Trixie can silently lose WiFi and stay dead
+  until power-cycled.** Symptom: tailscale control plane shows the Pi
+  `offline, last seen Xh ago`, LAN ARP entry goes "incomplete," ESP32
+  leaves on the same Mockingbird WiFi keep working fine (so it's not
+  the AP). systemd-side `tailscaled` is `active+enabled` so when WiFi
+  comes back it would reconnect — except it doesn't, the wlan0 driver
+  appears wedged. Fix: unplug-replug. Operational followup that's not
+  yet done: a watchdog cron on the Pi that pings the Opal every minute
+  and `nmcli connection up Mockingbird` if it fails N times. Filed as
+  a P1 against Macca.
+- **Pi tailscale subnet route advertisement is lost across reflashes.**
+  Even when the route was previously approved at the control plane
+  (approval IS sticky), the local `AdvertiseRoutes` pref needs to be
+  re-set on the new install. Symptom: `tailscale status --json` shows
+  the Pi's `Self.AllowedIPs` containing only its own /32 (no
+  `192.168.8.0/24`), and `Self.PrimaryRoutes` is null. Fix:
+  `sudo tailscale set --advertise-routes=192.168.8.0/24` on the Pi.
+  The control plane re-approves automatically; takes seconds.
+- **Windows tailscale gets stuck in `NoState` without a logged-in user**
+  unless you set `--unattended`. The `Tailscale` Windows service runs
+  fine, `tailscaled.exe` is alive, but `tailscale status` returns
+  `unexpected state: NoState` and health says "Tailscale is starting.
+  Please wait." indefinitely. Fix once per machine: SSH in, run
+  `tailscale up --unattended`. The pref persists across reboots. Without
+  it, the daemon needs an active GUI session (i.e., someone actually
+  logged into the desktop) to authenticate — fine for a workstation,
+  useless for a headless GPU box. This bit svr — see its section above.
 - **macOS doesn't speak RNDIS.** USB gadget mode `g_ether` defaults to
   RNDIS on modern Raspberry Pi OS kernels and macOS won't bind a network
   interface. Use `g_cdc` (CDC ECM + ACM composite) instead. Even then,
@@ -296,28 +376,54 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 - **Mac:** on Mockingbird at `192.168.8.134`, sees Pi as a direct
   WireGuard peer (14ms RTT, no DERP relay). Tailscale ed25519 SSH key
   installed on both Pi and Opal.
-- **ESP32 leaves (running v0.3.0-stream firmware):**
+- **ESP32 leaves (firmware pinned at `v0.3.1-stream` in `platformio.ini`; 8 total deployed):** <!-- VERIFY: Vlad/Ethan — confirm what's actually flashed on the fleet. Tier-1 calibration firmware (commit 7992962) and parameterized obs-queue firmware (8e8a451) have landed on branches since the doc was written; the on-device build may be newer than the platformio.ini pin suggests. -->
   - `mockingbird-4ce184` (MAC `8c:94:df:4c:e1:84`) — last seen `192.168.8.244`
   - `mockingbird-4c0bdc` (MAC `8c:94:df:4c:0b:dc`) — last seen `192.168.8.196`
   - `mockingbird-4c36ec` (MAC `8c:94:df:4c:36:ec`) — last seen `192.168.8.219`
   - `mockingbird-4db204` (MAC `8c:94:df:4d:b2:04`) — last seen `192.168.8.168`
-  - All four **stream BLE observations as newline-delimited JSON over TCP
-    to `mockingbird-pi:9001`** (the collector). Per-leaf state on-device
+  - `mockingbird-4ce1d8` (MAC `8c:94:df:4c:e1:d8`) — last seen `192.168.8.178` *(flashed 2026-05-11)*
+  - `mockingbird-4ceb7c` (MAC `8c:94:df:4c:eb:7c`) — last seen `192.168.8.126` *(flashed 2026-05-11)*
+  - `mockingbird-92838c` (MAC `30:76:f5:92:83:8c`) — last seen `192.168.8.204` *(flashed 2026-05-11; Espressif OUI, not AITRIP — different batch)*
+  - `mockingbird-4d4384` (MAC `8c:94:df:4d:43:84`) — last seen `192.168.8.107` *(flashed 2026-05-11)*
+  - All eight **stream BLE observations as newline-delimited JSON over TCP
+    to `mockingbird-pi:9001`** (the collector). Leaves discover the
+    collector via mDNS (`mockingbird-pi.local`, resolved against avahi on
+    the Pi with a 5 s timeout at first connect), falling back to the
+    `MOCKINGBIRD_COLLECTOR_HOST` build flag if mDNS misses. The cached IP
+    is invalidated on any connect or short-write failure, so a Pi DHCP
+    lease flip no longer silences the fleet — they re-resolve on the next
+    reconnect cycle. Per-leaf state on-device
     is now just a 64-entry queue + counters, no accumulation, no OOM.
-    Heap stays at ~120 KB free under continuous heavy scanning.
+    Heap stays at ~110–125 KB free under continuous heavy scanning.
+    Each `obs` line carries `mac, rssi, addr_type, ch, name, manuf, t_ms,
+    location`. `ch` is the BLE primary advertising channel (37/38/39) and
+    is `0` on leaves that can't determine it — NimBLE-Arduino 1.4.2's
+    legacy callback path doesn't expose the channel index; see firmware
+    `main.cpp` (PURU-2) for the follow-up plan. Collector stores it as
+    `obs.chan INTEGER`, nullable.
   - HTTP API on `:80` is minimal: `GET /`, `GET /version`, `POST /restart`.
     `/scan/*` is gone (the Pi has every observation continuously).
   - ArduinoOTA on UDP 3232 still works; the BLE scan pauses during OTA.
-  - 6 unflashed AITRIP boards remain in the pack.
+  - ~3 unflashed AITRIP boards remain in the pack (started with 10 AITRIP; 7 AITRIP deployed; 1 of the deployed 8 is a non-AITRIP Espressif-OUI unit from a different batch — so 10 − 7 = 3 AITRIP left). <!-- VERIFY: Noah to physically count the unflashed boards on the desk. -->
 - One unit on entropy at `192.168.0.172` (MAC `58:e6:c5:6f:4a:dc`) with old
-  pre-mockingbird firmware — needs reflash to join the mesh.
+  pre-mockingbird firmware — needs reflash to join the mesh. <!-- VERIFY: Noah/Vlad — ping 192.168.0.172. If responds, reflash. If not, delete this line. -->
 - ESP32 firmware in `main/`: never been built (ESP-IDF not installed,
   hardware target is S3 which Noah doesn't own yet).
-- **Pi collector service** (`mockingbird-collector.service`) running as a
-  systemd unit on the Pi: listens on `0.0.0.0:9001`, writes every
-  observation into `~/mockingbird/observations.sqlite` with indices on
-  `(ts)`, `(mac, ts)`, `(leaf, ts)`. Also stores `leaf_events` table for
-  hello/heartbeat/disconnect tracking.
+- **Pi services on the Pi (systemd):**
+  - `mockingbird-collector.service` → `services/mockingbird-collector.py`:
+    listens on `0.0.0.0:9001`, writes every observation into
+    `~/mockingbird/observations.sqlite` with indices on `(ts)`, `(mac, ts)`,
+    `(leaf, ts)`. Stores `leaf_events` for hello/heartbeat/disconnect.
+    Hardened by MAC-2: crash-loop guard, OOM bias `-500`, MemoryHigh=128M /
+    MemoryMax=192M, graceful SIGINT shutdown, journald cap.
+  - `mockingbird-dashboard.service` → `services/mockingbird-dashboard.py`
+    + `services/dashboard.html`: live Three.js web UI on `:8080`
+    (live heatmap, trails, click-to-select, debounced auto-save, bird
+    codenames, north compass).
+  - `services/mockingbird_calibration.py`: per-leaf TX/RX bias decomposition
+    + path-loss solver (Puru's RF review covers this).
+  - `services/mockingbird_tracks.py`: Kalman fusion + entity clustering
+    (multi-MAC tracks survive Apple Continuity MAC rotation).
 - **Live analysis** via `scripts/analyze_ble_db.py` — query any time
   window from the SQLite DB on the Pi. Output: per-leaf rates, uplink
   health from latest heartbeat, coverage histogram, RSSI matrix, biggest-
@@ -328,40 +434,66 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
 - Old `scripts/analyze_ble_capture.py` kept for the legacy JSON-file
   captures in `~/repos/.scratch/ble-captures/`; new captures don't
   produce JSON files at all — everything goes straight to the DB.
-- Earlier `scripts/bootstrap-glinet-router.sh` is **deleted** (was wrong
-  architecture). `scripts/bootstrap-pi-subnet-router.sh` is the current
-  one.
+- `scripts/bootstrap-pi-subnet-router.sh` is the canonical bootstrap
+  for the Pi side of the mesh (Opal is a dumb AP and isn't scripted).
+- `tools/ota_serve.py` is the helper for pushing OTA images to leaves
+  by mDNS hostname (`mockingbird-<chipid>.local`) — used during fleet
+  reflashes from the Mac.
 
-## Future capabilities (full list in `docs/roadmap.md`)
+## How we test
 
-- **IMU (gyro + accel) on each leaf** — orientation-aware RSSI normalization
-  (closes the spread-ratio uncertainty gap), tamper detection, multimodal
-  activity context. ~$2 MPU6050 wired to I²C on the WROOM-32.
-- **Real trilateration** — once leaf positions are recorded, solve the
-  system instead of just reporting relative distance ratios.
-- **Live TUI / web dashboard** — tail-the-DB rolling view of "what does
-  the network see right now."
+Test suite lives in `tests/` (pytest), with `conftest.py` and starter
+coverage from Andy's ANDY-1/ANDY-2 audits:
+- `test_wire_contract.py` — leaf-to-collector JSON wire format + canary
+- `test_calibration_pathloss.py`, `test_calibration_solvers.py` — RF math
+- `test_numerical_stability.py` — Joseph-form Kalman, Tikhonov-regularized solves
+- `test_tracks_smoothing.py` — entity clustering / track fusion
+Coverage audit at `docs/test/coverage-audit.md`. <!-- VERIFY: Andy — once `docs/test-pyramid` branch (`docs/testing.md`) merges to main, add a pointer here. -->
+
+## Shipped capabilities
+
+(Full status list in `docs/roadmap.md`.)
+
+- Distributed BLE sensing: 8 leaves stream observations → Pi collector → SQLite.
+- MLE multilateration with per-leaf TX/RX bias decomposition.
+- Robust Kalman fusion (Joseph form, Tikhonov-regularized solves), heavy
+  EWMA for centroid devices (jitter 300 cm → 18 cm).
+- Entity clustering: multi-MAC tracks survive Apple Continuity rotation;
+  phone auto-detection via 4-leaf walk.
+- Live Three.js web dashboard on `:8080`: heatmap, trails, click-to-select,
+  bird codenames, north compass, debounced auto-save.
+- Adaptive ZUPT + velocity clamp (kills phantom motion).
+- Wire-format contract tests + canary.
+
+## Future capabilities (full list in `docs/roadmap.md`; Q3 PRDs in `docs/prds/`)
+
+- **Person fingerprinting Phases 1 & 2** — co-occurrence clustering +
+  Apple Continuity sub-protocol fingerprints for stable identity across
+  MAC rotation. PRD: `docs/prds/person-fingerprinting-phase-1-2.md`. Owner: Wanjiru.
+- **IMU on every leaf** — MPU6050 over I²C; orientation-aware RSSI
+  normalization, tamper detection, activity context. PRD:
+  `docs/prds/imu-on-leaves.md`. Owners: Puru (RF) + Ethan (FW).
+- **Presence & anomaly alerts** — household-level "who is where, is this
+  normal?" PRD: `docs/prds/presence-anomaly-alerts.md`. Owner: Ethan.
 - **ESP-NOW peer mesh** — for leaves out of WiFi range.
-- **ESP32-S3 firmware path** — already designed in `main/`, just unflashed.
+- **ESP32-S3 firmware path** — designed in `main/`, unflashed; awaits S3 hardware.
 - **Battery-powered leaves**, **audio leaf** (I²S MEMS mic + classifier),
   **PIR-augmented leaf**, **HomeKit/HA bridge**.
 
+Spec-lock for the three Q3 PRDs: **2026-05-20** (Sophie chairs weekly
+PRD review every Monday 10:00).
+
 ## Next moves on deck
 
-1. Flash one ESP32-WROOM-32 with custom firmware (target plain ESP32, not
-   ESP32-S3 — see `main/` retargeting work). Make it join Mockingbird and
-   register itself with the Pi.
-2. Build the first capability on the Pi: **distributed BLE sensing** —
-   ESP32s scan, Pi aggregates + dedups + RSSI-fuses.
-3. Rewrite `scripts/bootstrap-glinet-router.sh` to match the actual
-   architecture (Opal = dumb AP, no Tailscale on it). Or write
-   `scripts/bootstrap-pi-tailscale.sh` to reproduce the Pi setup.
-4. Move the existing ESP32 at `192.168.0.172` to Mockingbird (reflash with
-   mockingbird firmware once it exists).
-4. Confirm reachability of the Pi from another tailnet peer via its
-   new 192.168.8.x address
-5. Decide ESP32 firmware approach for the BLE sensing capability —
-   PlatformIO/Arduino with `NimBLE-Arduino` is the lightest path on
-   plain WROOM-32; ESP-IDF + `host/nimble` for more control
-6. Flash one ESP32 as a proof-of-concept BLE scanner publishing to MQTT
-   on the Pi, before flashing the whole fleet
+1. Land the three Q3 PRDs (`docs/prds/`) by the 2026-05-20 spec-lock:
+   Person fingerprinting (Wanjiru), IMU on leaves (Puru + Ethan),
+   Presence & anomaly alerts (Ethan).
+2. Order MPU6050 IMU parts so the IMU PRD isn't blocked by shipping lead time.
+3. Close out the post-integration cleanup items from the Q3 reviews:
+   - Macca: DHCP reservation for Pi (or move leaves to `mockingbird-pi.local` mDNS) — see VERIFY comment on the Pi LAN line above.
+   - Vlad/Ethan: confirm what firmware version is actually flashed on the fleet (audit item #1).
+   - Sophie: drive a `docs/roadmap.md` status pass (move shipped items out of "Planned").
+4. Decide rogue ESP32 at `192.168.0.172`: reflash and bring to Mockingbird, or remove from inventory (audit item #9).
+5. Optional: write `scripts/bootstrap-pi-tailscale.sh` to reproduce the
+   Pi-as-subnet-router setup from scratch (the Opal bootstrap is
+   intentionally not scripted — it's a one-time stock-firmware setup).

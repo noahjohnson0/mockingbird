@@ -41,6 +41,8 @@
 #include <esp_system.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "secrets.h"
 
@@ -51,6 +53,13 @@ static const char *FW_VERSION = MOCKINGBIRD_FW_VERSION;
 #endif
 #ifndef MOCKINGBIRD_COLLECTOR_PORT
 #define MOCKINGBIRD_COLLECTOR_PORT 9001
+#endif
+#ifndef MOCKINGBIRD_COLLECTOR_MDNS_HOST
+// Bare hostname (no .local) — avahi on the Pi publishes "mockingbird-pi.local".
+#define MOCKINGBIRD_COLLECTOR_MDNS_HOST "mockingbird-pi"
+#endif
+#ifndef MOCKINGBIRD_MDNS_TIMEOUT_MS
+#define MOCKINGBIRD_MDNS_TIMEOUT_MS 5000
 #endif
 
 static String deviceHostname() {
@@ -89,12 +98,19 @@ struct Msg {
     char     mac[18];     // "AA:BB:CC:DD:EE:FF\0"
     int8_t   rssi;
     uint8_t  addr_type;
+    uint8_t  ch;          // primary advertising channel index: 37/38/39, or 0 = unknown
     char     name[24];    // truncated/sanitized
     char     manuf[33];   // hex of first 16 mfg-data bytes + NUL
     uint32_t t_ms;
 };
 
+// Build-time overridable for A/B testing different buffer depths against
+// the BLE+WiFi single-radio coex ceiling. Set via -DMSG_QUEUE_LEN=N in
+// platformio.ini or the CLI. 64 is the historic baseline (~3s of headroom
+// at 20 obs/s); larger absorbs longer TCP stalls without dropping BLE obs.
+#ifndef MSG_QUEUE_LEN
 #define MSG_QUEUE_LEN 64
+#endif
 
 static QueueHandle_t       g_q;
 static volatile uint32_t   g_n_sent    = 0;
@@ -110,6 +126,37 @@ class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
         m.rssi      = (int8_t)d->getRSSI();
         m.addr_type = d->getAddressType();
         m.t_ms      = millis();
+
+        // Primary advertising channel index (37/38/39).
+        //
+        // RF context: a BLE advertiser cycles its ADV_IND PDU across the three
+        // primary channels (2402/2426/2480 MHz). Per-channel RSSI bias is a
+        // real physical effect — antenna gain, package/PCB reflections, and
+        // WiFi co-channel interference all differ at those three frequencies.
+        // Capturing this per-observation lets calibration cancel it out
+        // downstream (Vlad's P0 physical effect; tracked separately —
+        // PURU-2 ships the plumbing only, math comes in a follow-up).
+        //
+        // NimBLE-Arduino 1.4.2 caveat: the legacy onResult() callback path
+        // does NOT plumb the primary channel through. `ble_gap_disc_desc`
+        // (host/include/host/ble_gap.h) has no channel field, and the host
+        // discards the controller's channel hint before invoking us. The
+        // HCI LE Advertising Report event itself per Core spec carries no
+        // channel index — only the Extended Advertising Report does, and
+        // ESP32 (classic, non-S3) controller support for ext-adv reports is
+        // patchy.
+        //
+        // For now we stamp 0 = "unknown" so the schema and downstream
+        // collector/DB are wired up. Two real-source options for the
+        // follow-up ticket:
+        //   1) Patch NimBLE host (ble_hs_hci_evt.c) to stash the controller's
+        //      channel hint into the disc_desc, then add a getter on
+        //      NimBLEAdvertisedDevice. ~30 LOC, but it's a vendored patch.
+        //   2) Move scanning to ESP-IDF host/nimble directly and hook the
+        //      raw HCI event — cleaner separation of concerns.
+        // Either way, only this assignment changes; the wire format and
+        // collector are stable.
+        m.ch = 0;
 
         if (d->haveName()) {
             const std::string &raw = d->getName();
@@ -141,11 +188,58 @@ class ScanCB : public NimBLEAdvertisedDeviceCallbacks {
 
 static WiFiClient g_tcp;
 
+// Cached collector IP. Resolved via mDNS query for MOCKINGBIRD_COLLECTOR_MDNS_HOST
+// at first connect; falls back to the compile-time MOCKINGBIRD_COLLECTOR_HOST on
+// failure. Invalidated on any connect/short-write failure so we re-resolve and
+// pick up a Pi that DHCP-flipped its lease.
+static IPAddress g_collector_ip((uint32_t)0);
+static char      g_collector_src[8] = "none";  // "mdns" or "static"
+
+static void invalidate_collector_ip() {
+    g_collector_ip = IPAddress((uint32_t)0);
+    g_collector_src[0] = 'n'; g_collector_src[1] = 'o';
+    g_collector_src[2] = 'n'; g_collector_src[3] = 'e';
+    g_collector_src[4] = 0;
+}
+
+static bool resolve_collector() {
+    // Try mDNS first. ESP32's MDNS.queryHost() blocks up to `timeout_ms` and
+    // returns INADDR_NONE (0.0.0.0) on failure. 5 s is generous; avahi on
+    // the Pi typically responds in <100 ms once the leaf is on the AP.
+    IPAddress ip = MDNS.queryHost(MOCKINGBIRD_COLLECTOR_MDNS_HOST,
+                                  MOCKINGBIRD_MDNS_TIMEOUT_MS);
+    if (ip != IPAddress((uint32_t)0)) {
+        g_collector_ip = ip;
+        strcpy(g_collector_src, "mdns");
+        Serial.printf("[uplink] mDNS resolved %s.local -> %s\n",
+                      MOCKINGBIRD_COLLECTOR_MDNS_HOST, ip.toString().c_str());
+        return true;
+    }
+    // Fallback: parse the compile-time literal.
+    if (g_collector_ip.fromString(MOCKINGBIRD_COLLECTOR_HOST)) {
+        strcpy(g_collector_src, "static");
+        Serial.printf("[uplink] mDNS miss; falling back to static %s\n",
+                      MOCKINGBIRD_COLLECTOR_HOST);
+        return true;
+    }
+    Serial.printf("[uplink] could not resolve collector (mDNS+static both failed)\n");
+    return false;
+}
+
 static bool uplink_connect() {
     if (g_tcp.connected()) return true;
-    Serial.printf("[uplink] connecting to %s:%d...\n",
-                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
-    if (!g_tcp.connect(MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT, 5000)) {
+    if (g_collector_ip == IPAddress((uint32_t)0)) {
+        if (!resolve_collector()) {
+            g_up = false;
+            return false;
+        }
+    }
+    Serial.printf("[uplink] connecting to %s:%d (via %s)...\n",
+                  g_collector_ip.toString().c_str(),
+                  MOCKINGBIRD_COLLECTOR_PORT, g_collector_src);
+    if (!g_tcp.connect(g_collector_ip, MOCKINGBIRD_COLLECTOR_PORT, 5000)) {
+        // The cached IP is dead — drop it so the next attempt re-resolves.
+        invalidate_collector_ip();
         g_up = false;
         return false;
     }
@@ -158,6 +252,21 @@ static bool uplink_connect() {
     if (fd >= 0) {
         struct timeval to = {1, 0};
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+
+        // TCP keepalive: detect half-open connections that the application
+        // layer can't see. Without these, a leaf can sit happily writing
+        // bytes into a dead socket's local TX buffer for minutes before
+        // realizing nothing is being delivered. With these, the kernel
+        // probes at IDLE seconds of silence, retries every INTVL, gives
+        // up after CNT misses → dead connection detected in ~25 s.
+        int on = 1;
+        int idle = 15;   // seconds of idle before first probe
+        int intvl = 5;   // seconds between probes
+        int cnt = 2;     // probes before giving up
+        setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &on,    sizeof(on));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
     }
 
     char hello[200];
@@ -190,9 +299,11 @@ static void uplink_task(void * /*pv*/) {
             int n = snprintf(
                 line, sizeof(line),
                 "{\"event\":\"obs\",\"mac\":\"%s\",\"rssi\":%d,\"addr_type\":%u,"
+                "\"ch\":%u,"
                 "\"name\":\"%s\",\"manuf\":\"%s\",\"t_ms\":%lu,"
                 "\"location\":\"%s\"}\n",
                 m.mac, m.rssi, (unsigned)m.addr_type,
+                (unsigned)m.ch,
                 m.name, m.manuf, (unsigned long)m.t_ms,
                 g_location);
 
@@ -208,6 +319,8 @@ static void uplink_task(void * /*pv*/) {
                 g_n_dropped++;
                 Serial.printf("[uplink] short write %d/%d — reconnect\n", wrote, n);
                 g_tcp.stop();
+                // Peer may have moved (DHCP flip on the Pi). Force re-resolve.
+                invalidate_collector_ip();
             }
         }
 
@@ -232,12 +345,15 @@ static void uplink_task(void * /*pv*/) {
 
 static void handleStatus() {
     char body[560];
+    String hostStr = (g_collector_ip == IPAddress((uint32_t)0))
+                       ? String(MOCKINGBIRD_COLLECTOR_HOST)
+                       : g_collector_ip.toString();
     snprintf(body, sizeof(body),
              "{\"hostname\":\"%s\",\"version\":\"%s\",\"location\":\"%s\","
              "\"uptime_s\":%lu,\"rssi\":%d,\"free_heap\":%u,"
              "\"ip\":\"%s\",\"mac\":\"%s\","
              "\"uplink\":{\"connected\":%s,\"sent\":%lu,\"dropped\":%lu,"
-             "\"q_depth\":%d,\"host\":\"%s:%d\"}}",
+             "\"q_depth\":%d,\"host\":\"%s:%d\",\"host_src\":\"%s\"}}",
              deviceHostname().c_str(), FW_VERSION, g_location,
              (unsigned long)(millis() / 1000UL),
              WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
@@ -246,7 +362,8 @@ static void handleStatus() {
              g_up ? "true" : "false",
              (unsigned long)g_n_sent, (unsigned long)g_n_dropped,
              (int)uxQueueMessagesWaiting(g_q),
-             MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+             hostStr.c_str(), MOCKINGBIRD_COLLECTOR_PORT,
+             g_collector_src);
     server.send(200, "application/json", body);
 }
 
@@ -336,7 +453,10 @@ static void startOTA() {
 }
 
 static void startBLE() {
-    NimBLEDevice::init("");
+    // Set the device name to our hostname so other leaves see "mockingbird-XXXXXX"
+    // in advertising data and can identify us.
+    NimBLEDevice::init(deviceHostname().c_str());
+
     auto *pScan = NimBLEDevice::getScan();
     pScan->setAdvertisedDeviceCallbacks(new ScanCB(), /*wantDup=*/true);
     pScan->setActiveScan(true);
@@ -345,6 +465,31 @@ static void startBLE() {
     pScan->setMaxResults(0);
     pScan->start(0, nullptr, false);
     Serial.println("[ble] scanner running");
+
+    // ---- Tier-1 calibration: advertise our existence to other leaves ----
+    // Each leaf transmits a small BLE advertisement every ~1s containing its
+    // hostname. Other leaves' scanners pick it up like any other BLE device,
+    // and the collector can identify these "leaf-to-leaf" observations by the
+    // name prefix. Since we have known distances between every pair of leaves,
+    // these are HIGH-FIDELITY ground-truth (rssi, distance) calibration points.
+    auto *pAdv = NimBLEDevice::getAdvertising();
+    NimBLEAdvertisementData adv;
+    adv.setName(deviceHostname().c_str());  // "mockingbird-XXXXXX"
+    // Use company ID 0xFFFF (test/reserved, IEEE-recognized for non-production
+    // use) followed by magic "MOCK" so the collector can quickly identify
+    // leaf-source observations.
+    std::string manuf;
+    manuf.push_back((char)0xFF);
+    manuf.push_back((char)0xFF);
+    manuf += "MOCK";
+    adv.setManufacturerData(manuf);
+    pAdv->setAdvertisementData(adv);
+    // 1s advertising interval (NimBLE uses 0.625ms units; 1600 = 1000ms)
+    pAdv->setMinInterval(1600);
+    pAdv->setMaxInterval(1600);
+    pAdv->start();
+    Serial.printf("[ble] advertising as %s (1s interval)\n",
+                  deviceHostname().c_str());
 }
 
 // ---------- main ----------
@@ -387,8 +532,11 @@ void setup() {
     server.on("/location", HTTP_GET,  handleLocationGet);
     server.on("/location", HTTP_POST, handleLocationPost);
     server.begin();
-    Serial.printf("[http] :80 ready; streaming to %s:%d\n",
-                  MOCKINGBIRD_COLLECTOR_HOST, MOCKINGBIRD_COLLECTOR_PORT);
+    Serial.printf("[http] :80 ready; will stream to %s.local:%d "
+                  "(fallback %s)\n",
+                  MOCKINGBIRD_COLLECTOR_MDNS_HOST,
+                  MOCKINGBIRD_COLLECTOR_PORT,
+                  MOCKINGBIRD_COLLECTOR_HOST);
 }
 
 void loop() {
