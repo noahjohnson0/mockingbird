@@ -97,6 +97,15 @@
   }
   .tab:hover { color: #cdd1d7; }
   .tab.active { color: #79c4ff; border-bottom-color: #1d6fef; }
+  /* Visible focus for keyboard nav (WCAG 2.4.7). The default :focus
+     outline inside a flex tablist gets clipped by the bottom border, so
+     use an inset box-shadow that's safe inside the row. */
+  .tab:focus { outline: none; }
+  .tab:focus-visible {
+    color: #fff;
+    box-shadow: inset 0 0 0 2px #1d6fef;
+    border-radius: 2px;
+  }
   .tab .pulse {
     display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: #22c55e; margin-left: 6px; vertical-align: middle;
@@ -117,6 +126,22 @@
   .live-count { font-size: 28px; font-weight: 700; color: #79c4ff; font-family: ui-monospace, monospace; }
   .live-count-label { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
   .live-asof { color: #6b7280; font-size: 11px; margin-left: auto; font-family: ui-monospace, monospace; }
+  /* Freshness states for the as-of clock. fresh = quiet grey; warming
+     amber once we cross the expected poll interval; red once the data
+     is clearly stale (> ~10s). Operator gets a visual signal *before*
+     they're staring at numbers that haven't moved. */
+  .live-asof.warm { color: #f59e0b; }
+  .live-asof.stale { color: #ef4444; font-weight: 600; }
+  /* Connection-lost banner: takes over the as-of badge when /api/live
+     has failed N consecutive times. Pulses so it draws the eye even in
+     peripheral vision; says exactly what's wrong, no jargon. */
+  .live-conn-lost {
+    margin-left: auto; padding: 3px 8px; border-radius: 3px;
+    background: #5a0e0e; color: #fff; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    font-family: ui-monospace, monospace;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
   .dev-row {
     background: #1c1f24; border-radius: 4px; padding: 8px 10px;
     margin-bottom: 4px; border: 1px solid #232730;
@@ -305,17 +330,36 @@
   }
   .leaf-stat-row:last-child { border-bottom: 0; }
   .leaf-stat-row .lname { color: #cdd1d7; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
+  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
+  /* Status indicator — shape AND color so colorblind operators (and
+     anyone at 2 a.m.) can read it. ● circle = OK, ▲ triangle = STALE,
+     ■ square = OFFLINE. clip-path gives crisp geometry at small sizes
+     where a unicode glyph would render fuzzy. */
+  .leaf-stat-row .status-dot {
+    width: 10px; height: 10px; flex-shrink: 0;
+    background: #22c55e;
+    border-radius: 50%;  /* default = circle (OK) */
+  }
+  .leaf-stat-row.is-stale .status-dot {
+    background: #f59e0b;
+    border-radius: 0;
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);  /* triangle */
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .leaf-stat-row.is-offline .status-dot {
+    background: #ef4444;
+    border-radius: 1px;
+    clip-path: none;  /* square */
+    animation: pulse 1.0s ease-in-out infinite;
+  }
+  /* OK rows also get a thin green left border so the column has three
+     unique non-color signals (shape, border presence, word) on top of
+     the three colors. */
+  .leaf-stat-row.is-ok { border-left: 2px solid #22c55e; padding-left: 2px; }
   .leaf-stat-row .stale { color: #f59e0b; }
   .leaf-stat-row .ok    { color: #22c55e; }
   .leaf-stat-row .err   { color: #ef4444; }
-  .leaf-stat-row.is-stale   { background: linear-gradient(90deg, rgba(245,158,11,0.10), transparent); }
-  .leaf-stat-row.is-offline { background: linear-gradient(90deg, rgba(239,68,68,0.15), transparent); border-left: 2px solid #ef4444; padding-left: 2px; }
-  .leaf-stat-row .status-dot {
-    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-    background: #22c55e;
-  }
-  .leaf-stat-row.is-stale   .status-dot { background: #f59e0b; animation: pulse 1.4s ease-in-out infinite; }
-  .leaf-stat-row.is-offline .status-dot { background: #ef4444; animation: pulse 1.0s ease-in-out infinite; }
   .leaf-stat-head {
     color: #6b7280; font-size: 9px; text-transform: uppercase;
     letter-spacing: 0.06em; padding: 4px;
@@ -358,13 +402,13 @@
   </div>
 </div>
 <div id="side">
-  <div class="tabs">
-    <div class="tab active" data-tab="setup">Setup</div>
-    <div class="tab" data-tab="live">Live<span class="pulse" style="display:none" id="live-pulse"></span></div>
-    <div class="tab" data-tab="stats">Stats</div>
+  <div class="tabs" role="tablist" aria-label="Dashboard sections">
+    <div class="tab active" data-tab="setup" role="tab" id="tab-setup"  aria-controls="setup-pane" aria-selected="true"  tabindex="0">Setup</div>
+    <div class="tab"        data-tab="live"  role="tab" id="tab-live"   aria-controls="live-pane"  aria-selected="false" tabindex="-1">Live<span class="pulse" style="display:none" id="live-pulse" aria-hidden="true"></span></div>
+    <div class="tab"        data-tab="stats" role="tab" id="tab-stats"  aria-controls="stats-pane" aria-selected="false" tabindex="-1">Stats</div>
   </div>
 
-<div class="pane active" id="setup-pane">
+<div class="pane active" id="setup-pane" role="tabpanel" aria-labelledby="tab-setup" tabindex="0">
   <h1>mockingbird · room</h1>
   <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
 
@@ -502,7 +546,7 @@
   </div>
 </div><!-- /setup-pane -->
 
-<div class="pane" id="live-pane">
+<div class="pane" id="live-pane" role="tabpanel" aria-labelledby="tab-live" tabindex="0" hidden>
   <h1>live · device tracking</h1>
   <div class="sub">Apple-fingerprint devices seen by ≥2 positioned leaves in the last 8 s, weighted-centroid positioned. Refreshes 2×/sec.</div>
 
@@ -546,7 +590,7 @@
   </div>
 </div><!-- /live-pane -->
 
-<div class="pane" id="stats-pane">
+<div class="pane" id="stats-pane" role="tabpanel" aria-labelledby="tab-stats" tabindex="0" hidden>
   <h1>system stats</h1>
   <div class="sub">Pi health + per-leaf streaming state. Refreshes every 3 s.</div>
 
@@ -2233,8 +2277,14 @@ async function pollLive() {
     }
     const devs = r.devices || [];
     liveCountEl.textContent = devs.length;
-    const ts = new Date((r.as_of || Date.now() / 1000) * 1000);
-    liveAsofEl.textContent = ts.toTimeString().slice(0, 8);
+    // Track freshness so the operator can tell at a glance when the
+    // displayed positions are minutes-old rather than 200ms-old. The
+    // age tick (below, every 500ms) updates the display continuously
+    // even when no new data has arrived.
+    _liveLastAsOf = (r.as_of || Date.now() / 1000) * 1000;
+    _liveLastSuccess = Date.now();
+    _liveFailStreak = 0;
+    _liveRenderFreshness();
     // Positioning method breakdown
     const methodEl = document.getElementById('live-method');
     const methodDetail = document.getElementById('live-method-detail');
@@ -2278,6 +2328,8 @@ async function pollLive() {
     _liveFirstPollDone = true;
   } catch (e) {
     console.error('pollLive', e);
+    _liveFailStreak++;
+    _liveRenderFreshness();
     if (!_liveFirstPollDone) {
       liveListEl.innerHTML = '<div class="empty">poll failed — retrying…</div>';
     }
@@ -2286,9 +2338,69 @@ async function pollLive() {
   }
 }
 
-function setTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === name + '-pane'));
+// ---- live freshness indicator ----
+// Three sources of truth communicated by one widget on the live-summary card:
+//   1. how old is the data we're showing? (Xs ago, color-shifted past thresholds)
+//   2. is the dashboard still successfully talking to the Pi? (3+ failures → banner)
+//   3. wall-clock time the data was generated (preserved in title=)
+// The widget redraws every 500 ms whether or not data has arrived; the moment
+// the server stops responding, the operator sees the number count up.
+let _liveLastAsOf = 0;       // ms since epoch, server's as_of
+let _liveLastSuccess = 0;    // ms since epoch, when we last got a 200
+let _liveFailStreak = 0;     // consecutive failed polls
+const LIVE_AGE_WARM_S = 4;       // amber after this much staleness
+const LIVE_AGE_STALE_S = 10;     // red after this much
+const LIVE_CONN_LOST_FAILS = 3;  // banner after this many consecutive failures
+function _liveRenderFreshness() {
+  if (!liveAsofEl) return;
+  // Connection lost takes over the slot entirely.
+  if (_liveFailStreak >= LIVE_CONN_LOST_FAILS) {
+    liveAsofEl.className = 'live-conn-lost';
+    liveAsofEl.textContent = `CONNECTION LOST · ${_liveFailStreak} failed polls`;
+    liveAsofEl.title = _liveLastAsOf
+      ? `last successful update: ${new Date(_liveLastAsOf).toTimeString().slice(0,8)}`
+      : 'no successful update yet';
+    return;
+  }
+  // No data yet — keep the placeholder quiet.
+  if (!_liveLastAsOf) {
+    liveAsofEl.className = 'live-asof';
+    liveAsofEl.textContent = '—';
+    liveAsofEl.title = '';
+    return;
+  }
+  const ageS = (Date.now() - _liveLastAsOf) / 1000;
+  let cls = 'live-asof';
+  if (ageS > LIVE_AGE_STALE_S)      cls += ' stale';
+  else if (ageS > LIVE_AGE_WARM_S)  cls += ' warm';
+  liveAsofEl.className = cls;
+  // Human-readable age. Sub-second feels fresh; whole-seconds otherwise.
+  const text = ageS < 1
+    ? 'just now'
+    : ageS < 60   ? `${ageS.toFixed(0)}s ago`
+    : ageS < 3600 ? `${Math.floor(ageS/60)}m ${Math.floor(ageS%60)}s ago`
+    :               `${Math.floor(ageS/3600)}h ago`;
+  liveAsofEl.textContent = text;
+  liveAsofEl.title = `data timestamp: ${new Date(_liveLastAsOf).toTimeString().slice(0,8)}`;
+}
+// Tick the freshness indicator independently of polling so the age counts
+// up smoothly even when a poll is in flight or has failed.
+setInterval(_liveRenderFreshness, 500);
+
+function setTab(name, { focus = false } = {}) {
+  document.querySelectorAll('.tab').forEach(t => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    t.setAttribute('tabindex', on ? '0' : '-1');
+    if (on && focus) t.focus();
+  });
+  document.querySelectorAll('.pane').forEach(p => {
+    const on = p.id === name + '-pane';
+    p.classList.toggle('active', on);
+    // hidden attribute + aria stays in sync with .active so AT and CSS agree.
+    if (on) p.removeAttribute('hidden'); else p.setAttribute('hidden', '');
+  });
   if (name === 'live') {
     livePulse.style.display = 'inline-block';
     if (!_liveFirstPollDone) {
@@ -2372,14 +2484,20 @@ async function pollStats() {
         `${L.hb_age_s.toFixed(0)}s ago`;
       const ageCls = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
       const row = document.createElement('div');
-      row.className = 'leaf-stat-row' + (status === 'offline' ? ' is-offline' :
-                                         status === 'stale'   ? ' is-stale'   : '');
-      // Wide label for offline rows so user can spot them
-      const tag = status === 'offline' ? '<span class="err" style="font-size:9px; text-transform:uppercase">OFFLINE</span>' :
-                  status === 'stale'   ? '<span class="stale" style="font-size:9px; text-transform:uppercase">STALE</span>' : '';
+      row.className = 'leaf-stat-row ' + (status === 'offline' ? 'is-offline' :
+                                          status === 'stale'   ? 'is-stale'   :
+                                                                 'is-ok');
+      // Status word is shown on EVERY row (not just stale/offline) so the
+      // column reads uniformly — and so OK isn't signaled by color alone.
+      const tagCls   = status === 'offline' ? 'err' : status === 'stale' ? 'stale' : 'ok';
+      const tagLabel = status === 'offline' ? 'OFFLINE' : status === 'stale' ? 'STALE' : 'OK';
+      const tag = `<span class="${tagCls}" style="font-size:9px; text-transform:uppercase; font-weight:600">${tagLabel}</span>`;
+      // aria-label on the dot so screen-readers get the status; the shape
+      // (circle/triangle/square via clip-path) gives the same info visually
+      // to colorblind operators.
       row.innerHTML = `
         <div class="lname">
-          <span class="status-dot"></span>
+          <span class="status-dot" role="img" aria-label="${tagLabel.toLowerCase()}"></span>
           <span>${L.leaf.replace('mockingbird-', '')}</span>
         </div>
         <div>
@@ -2408,8 +2526,29 @@ async function pollStats() {
     console.error('pollStats', e);
   }
 }
-document.querySelectorAll('.tab').forEach(t => {
+// Tabs are keyboard-navigable per the WAI-ARIA tabs pattern:
+//   ←/→ : move focus + activate prev/next tab
+//   Home/End : move to first/last
+//   Enter/Space : activate the focused tab (also handled by click)
+// We use "activate-on-focus" because the panes are cheap to swap and an
+// operator skimming with arrow keys benefits from seeing each tab's content.
+const _tabEls = Array.from(document.querySelectorAll('.tab'));
+_tabEls.forEach((t, i) => {
   t.addEventListener('click', () => setTab(t.dataset.tab));
+  t.addEventListener('keydown', (ev) => {
+    let nextIdx = null;
+    switch (ev.key) {
+      case 'ArrowRight': nextIdx = (i + 1) % _tabEls.length; break;
+      case 'ArrowLeft':  nextIdx = (i - 1 + _tabEls.length) % _tabEls.length; break;
+      case 'Home':       nextIdx = 0; break;
+      case 'End':        nextIdx = _tabEls.length - 1; break;
+      case 'Enter':
+      case ' ':          setTab(t.dataset.tab); ev.preventDefault(); return;
+      default: return;
+    }
+    ev.preventDefault();
+    setTab(_tabEls[nextIdx].dataset.tab, { focus: true });
+  });
 });
 
 // ---- path-loss calibration ----
