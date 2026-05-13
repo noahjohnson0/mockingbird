@@ -259,8 +259,13 @@ def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
     y = [z[0] - x[0], z[1] - x[1], z[2] - x[2]]
 
     # Innovation covariance S = H P H^T + R = P[0:3,0:3] + R
+    # Tikhonov-regularize before inverting: S_reg = S + eps*tr(S)*I. For a
+    # healthy track this is a sub-ppm perturbation; for a track whose 3×3
+    # position covariance has collapsed (rare but possible after many
+    # near-identical measurements), it keeps S well-conditioned instead of
+    # silently dropping the update via the old |det|<1e-12 gate.
     S = [[P[i][j] + R[i][j] for j in range(3)] for i in range(3)]
-    S_inv = _invert_3x3_local(S)
+    S_inv = _invert_3x3_local(_tikhonov_regularize_3x3_local(S))
     if S_inv is None:
         return (x[0], x[1], x[2])
 
@@ -275,14 +280,17 @@ def kalman_step(track: "Track", measurement_xyz: tuple[float, float, float],
     for i in range(6):
         x[i] += K[i][0] * y[0] + K[i][1] * y[1] + K[i][2] * y[2]
 
-    # Covariance update: P = (I - K H) P
-    # (I - K H) has rows [identity - K], with H selecting first 3 cols
-    for i in range(6):
-        for j in range(6):
-            term = 0.0
-            for k in range(3):
-                term += K[i][k] * P[k][j]
-            P[i][j] -= term
+    # Covariance update — Joseph form:  P ← (I - K H) P (I - K H)ᵀ + K R Kᵀ
+    #
+    # Derivation: the optimal-K simplification (I - K H) P is algebraically
+    # equal to Joseph form only at the *exact* optimal K. In floating point
+    # K is slightly off-optimal, so (I - K H) P loses symmetry and PSD-ness
+    # over many updates and can drift to indefinite. Joseph form is the
+    # unconditionally PSD-preserving expression: it is the covariance of
+    # the residual error (I - K H)(x - x̂_prior) - K v under any K, with v
+    # the measurement noise. We then enforce P ← (P + Pᵀ)/2 to scrub the
+    # tiny asymmetry that floating-point still introduces.
+    P = _joseph_update(P, K, R)
     # ZUPT: adaptive radius scaled from this track's measured covariance.
     if track.last_cov_3x3 is not None:
         track_sigma = math.sqrt(max(0.01, sum(track.last_cov_3x3[i][i] for i in range(3)) / 3))
@@ -350,6 +358,94 @@ def _invert_3x3_local(M):
         [(f*g - d*i)*inv, (a*i - c*g)*inv, (c*d - a*f)*inv],
         [(d*h - e*g)*inv, (b*g - a*h)*inv, (a*e - b*d)*inv],
     ]
+
+
+# Tikhonov ridge scale — see mockingbird_calibration._EPS_TIKHONOV for the
+# rationale on why 1e-10 of the trace is "vanishingly small for healthy
+# matrices, condition-number-bounding for sick ones".
+_EPS_TIKHONOV_LOCAL = 1e-10
+
+
+def _tikhonov_regularize_3x3_local(M):
+    """Return M + eps*|tr(M)|*I as a fresh 3x3. Scale-invariant ridge."""
+    tr = M[0][0] + M[1][1] + M[2][2]
+    lam = _EPS_TIKHONOV_LOCAL * abs(tr)
+    return [
+        [M[0][0] + lam, M[0][1],       M[0][2]      ],
+        [M[1][0],       M[1][1] + lam, M[1][2]      ],
+        [M[2][0],       M[2][1],       M[2][2] + lam],
+    ]
+
+
+def _joseph_update(P, K, R):
+    """Joseph-form covariance update for the 6-state CV filter with H=[I 0].
+
+        P_post = (I - K H) P_prior (I - K H)ᵀ + K R Kᵀ
+
+    K is 6×3, R is 3×3, P is 6×6. (I - K H) is 6×6 — equal to I_6 with the
+    leftmost three columns replaced by (their identity column minus column
+    k of K). We compute the product directly without forming I-KH as a
+    materialized matrix, which is faster and avoids a transient asymmetry.
+
+    Why Joseph and not (I-KH)P:
+    The "short" form (I - K H) P is algebraically equal to Joseph only at
+    K = K_opt exactly. With floating-point K it is off by O(eps·‖P‖),
+    which compounds across hundreds of updates and breaks symmetry/PSD.
+    Joseph remains symmetric and PSD for *any* K, optimal or not — it's
+    the literal covariance of the post-update error under any gain. After
+    computing it we still enforce P ← (P + Pᵀ)/2 to flush the residual
+    asymmetry from finite-precision multiplies.
+    """
+    # A = (I - K H), 6×6.  H selects the first three columns: A_ij = δ_ij
+    # for j ∈ {3,4,5}; A_ij = δ_ij - K_ij for j ∈ {0,1,2}.
+    A = [[0.0] * 6 for _ in range(6)]
+    for i in range(6):
+        for j in range(6):
+            A[i][j] = 1.0 if i == j else 0.0
+            if j < 3:
+                A[i][j] -= K[i][j]
+
+    # T = A · P  (6×6)
+    T = [[0.0] * 6 for _ in range(6)]
+    for i in range(6):
+        for j in range(6):
+            s = 0.0
+            for k in range(6):
+                s += A[i][k] * P[k][j]
+            T[i][j] = s
+
+    # P_new = T · Aᵀ + K · R · Kᵀ
+    P_new = [[0.0] * 6 for _ in range(6)]
+    for i in range(6):
+        for j in range(6):
+            s = 0.0
+            for k in range(6):
+                s += T[i][k] * A[j][k]  # A[j][k] = (Aᵀ)[k][j]
+            P_new[i][j] = s
+
+    # K R Kᵀ:  KR is 6×3, then (KR)·Kᵀ is 6×6.
+    KR = [[0.0] * 3 for _ in range(6)]
+    for i in range(6):
+        for j in range(3):
+            s = 0.0
+            for k in range(3):
+                s += K[i][k] * R[k][j]
+            KR[i][j] = s
+    for i in range(6):
+        for j in range(6):
+            s = 0.0
+            for k in range(3):
+                s += KR[i][k] * K[j][k]
+            P_new[i][j] += s
+
+    # Symmetrize:  P ← (P + Pᵀ)/2.  Joseph form is exactly symmetric in
+    # exact arithmetic; in float it accrues O(eps) asymmetry per update.
+    for i in range(6):
+        for j in range(i + 1, 6):
+            avg = 0.5 * (P_new[i][j] + P_new[j][i])
+            P_new[i][j] = avg
+            P_new[j][i] = avg
+    return P_new
 
 
 def _clamp_pos_cov(C, min_std=0.1, max_std=5.0):
@@ -597,8 +693,11 @@ def _entity_kalman_step(ent: Entity, measurement_xyz: tuple[float, float, float]
 
     z = measurement_xyz
     y = [z[0] - x[0], z[1] - x[1], z[2] - x[2]]
+    # Tikhonov-regularize S before inversion (entity-level R can be very
+    # small after √N shrink, so S can become ill-conditioned faster here
+    # than at the per-track level — exactly the case Tikhonov is for).
     S = [[P[i][j] + R[i][j] for j in range(3)] for i in range(3)]
-    S_inv = _invert_3x3_local(S)
+    S_inv = _invert_3x3_local(_tikhonov_regularize_3x3_local(S))
     if S_inv is None:
         return (x[0], x[1], x[2])
 
@@ -609,12 +708,8 @@ def _entity_kalman_step(ent: Entity, measurement_xyz: tuple[float, float, float]
                 K[i][j] += P[i][k] * S_inv[k][j]
     for i in range(6):
         x[i] += K[i][0] * y[0] + K[i][1] * y[1] + K[i][2] * y[2]
-    for i in range(6):
-        for j in range(6):
-            term = 0.0
-            for k in range(3):
-                term += K[i][k] * P[k][j]
-            P[i][j] -= term
+    # Joseph-form covariance update (see derivation in _kalman_step).
+    P = _joseph_update(P, K, R)
     # Velocity magnitude clamp at entity level: same threshold as
     # per-track. Stops phantom drift on stationary entities cold.
     v_mag = math.sqrt(x[3] * x[3] + x[4] * x[4] + x[5] * x[5])
