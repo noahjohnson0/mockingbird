@@ -20,6 +20,13 @@
   h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; color: #fff; }
   .sub { color: #6b7280; font-size: 12px; margin-bottom: 12px; }
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin: 16px 0 6px; }
+  details > summary.cal-summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 16px 0 6px; user-select: none; }
+  details > summary.cal-summary::-webkit-details-marker { display: none; }
+  details > summary.cal-summary::before { content: '▸'; color: #6b7280; font-size: 10px; transition: transform 0.15s; display: inline-block; }
+  details[open] > summary.cal-summary::before { transform: rotate(90deg); }
+  details > summary.cal-summary:focus-visible { outline: 2px solid #79c4ff; outline-offset: 2px; border-radius: 3px; }
+  .cal-summary-state { font-size: 10px; color: #6b7280; text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: auto; }
+  .cal-summary-state.ok { color: #22c55e; }
   .leaf {
     background: #1c1f24; border-radius: 6px; padding: 10px; margin-bottom: 8px;
     border: 1px solid #232730;
@@ -435,7 +442,8 @@
     <input type="text" id="room-notes" placeholder="notes (optional)" style="margin-top:6px">
   </div>
 
-  <h2>path-loss calibration</h2>
+  <details id="cal-details" open>
+    <summary class="cal-summary"><h2 style="display:inline; margin:0">path-loss calibration</h2><span id="cal-summary-state" class="cal-summary-state"></span></summary>
   <div class="leaf" id="cal-panel">
     <div class="leaf-status" id="cal-status">not calibrated yet — positions use weighted centroid</div>
     <div id="cal-params" style="display:none; font-family: ui-monospace, monospace; font-size: 11px; color: #79c4ff; margin-top: 6px;"></div>
@@ -504,6 +512,7 @@
 
     <div id="cal-anchor-list" style="margin-top: 10px"></div>
   </div>
+  </details>
 
   <h2>leaves</h2>
   <div id="leaves">
@@ -763,6 +772,7 @@ function snapView(name) {
     default:      pos = tgt.clone().add(new THREE.Vector3( d * 0.7, d * 0.7, d * 0.7));
   }
   // Tween camera position + target. Small custom tween (no GSAP needed).
+  if (typeof wake === 'function') wake(500);
   const startPos = camera.position.clone();
   const startTgt = controls.target.clone();
   const t0 = performance.now();
@@ -1681,6 +1691,8 @@ let heatmapMesh = null;
 let _lastCalibration = null;
 let _leafPosCache = null;
 let _roomDimsCache = null;
+let _lastHeatmapRssi = null;     // last rssi vector that triggered a chi² recompute
+let _lastHeatmapKey = null;      // focusedKey:focusedKind at last compute
 
 (function initHeatmap() {
   const geom = new THREE.PlaneGeometry(1, 1, HEATMAP_RES - 1, HEATMAP_RES - 1);
@@ -1699,7 +1711,7 @@ let _roomDimsCache = null;
 
 let _heatmapCacheAgeTicks = 0;
 async function rebuildHeatmap() {
-  if (!focusedKey) { heatmapMesh.visible = false; return; }
+  if (!focusedKey) { heatmapMesh.visible = false; _lastHeatmapRssi = null; _lastHeatmapKey = null; return; }
   // Refresh cached cal + leaves every ~30 polls (= 15 s) so changes
   // propagate without re-fetching on every tick.
   if (++_heatmapCacheAgeTicks > 30) {
@@ -1742,8 +1754,34 @@ async function rebuildHeatmap() {
   }
   if (!rssiVec || Object.keys(rssiVec).length < 2) {
     heatmapMesh.visible = false;
+    _lastHeatmapRssi = null;
+    _lastHeatmapKey = null;
     return;
   }
+  // Skip the 1600-cell chi² recompute when the RSSI vector hasn't moved
+  // meaningfully (>0.5 dB on any leaf). On a typical poll the device sits
+  // still and every leaf reports within sensor noise — recomputing burns
+  // ~7 ms on desktop and ~25–40 ms on low-end Chromebooks for no visible
+  // change. The cache is keyed by (focusedKey, focusedKind) so switching
+  // selection always forces a fresh compute.
+  if (_lastHeatmapKey === focusedKey + ':' + focusedKind && _lastHeatmapRssi) {
+    let moved = false;
+    const prev = _lastHeatmapRssi;
+    for (const k in rssiVec) {
+      if (prev[k] == null || Math.abs(rssiVec[k] - prev[k]) > 0.5) { moved = true; break; }
+    }
+    if (!moved) {
+      for (const k in prev) {
+        if (rssiVec[k] == null) { moved = true; break; }
+      }
+    }
+    if (!moved) {
+      heatmapMesh.visible = true; // already drawn; just keep showing it
+      return;
+    }
+  }
+  _lastHeatmapRssi = Object.assign({}, rssiVec);
+  _lastHeatmapKey = focusedKey + ':' + focusedKind;
   // Build a lookup: leaf -> position + cal
   const leafInfo = {};
   for (const L of leaves) {
@@ -1809,9 +1847,32 @@ function tickLeafRotation() {
   }
 }
 
-// Render loop
-function loop() {
-  requestAnimationFrame(loop);
+// Render loop — pauses to ~5 fps when nothing is animating (no devices,
+// no entities, no in-flight tween, controls fully damped) to save the
+// operator's laptop battery. Wakes back to 60 fps on user interaction
+// or new data. The 200 ms idle interval still ticks the slow leaf-diamond
+// rotation so the scene doesn't feel frozen if you glance at it.
+let _wakeUntil = 0;
+const IDLE_FRAME_MS = 200;       // ~5 fps when idle
+const INTERACTION_WAKE_MS = 1500; // keep 60fps for 1.5s after any input
+function wake(ms) {
+  const t = performance.now() + (ms || INTERACTION_WAKE_MS);
+  if (t > _wakeUntil) _wakeUntil = t;
+}
+
+function _hasMotion(now) {
+  if (now < _wakeUntil) return true;
+  if (deviceByTrack.size > 0 || entityByID.size > 0) return true; // lerp/fade still settling
+  if (controls.autoRotate) return true;
+  // OrbitControls damping: when the user just stopped dragging, the
+  // camera keeps gliding a few frames. Detect by checking if controls
+  // would change anything — the cheapest proxy is the public `_state`
+  // being non-NONE, but that's private API. Instead use the wake window
+  // — pointer/wheel handlers push it forward. That's sufficient.
+  return false;
+}
+
+function renderOnce() {
   controls.update();
   tickLeafRotation();
   tickDeviceAnimation();
@@ -1824,7 +1885,31 @@ function loop() {
     maybeDismissLoader();
   }
 }
+
+function loop() {
+  renderOnce();
+  if (_hasMotion(performance.now())) {
+    requestAnimationFrame(loop);
+  } else {
+    // Idle: tick slowly via setTimeout so the leaf-diamond rotation
+    // doesn't freeze entirely, but we're not pinning a core at 60fps.
+    setTimeout(() => requestAnimationFrame(loop), IDLE_FRAME_MS);
+  }
+}
+
+// Wake on any user interaction with the scene or controls.
+['pointerdown', 'pointermove', 'wheel', 'touchstart', 'touchmove', 'keydown'].forEach(ev => {
+  sceneEl.addEventListener(ev, () => wake(), { passive: true });
+});
+controls.addEventListener('start',  () => wake(2000));
+controls.addEventListener('change', () => wake(500));
+controls.addEventListener('end',    () => wake(1200)); // cover damping coast
+
+// Wake on tab visibility return (the browser may have throttled us).
+document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
+
 setLoaderStage('compiling scene…');
+wake(3000); // warm-up: render the first 3s at 60fps so the scene composes
 loop();
 
 function ensureLeafMesh(leaf, idx) {
@@ -2252,6 +2337,9 @@ async function pollLive() {
   try {
     const r = await fetch('/api/live').then(r => r.json());
     applyLiveDevices(r.devices || [], r.entities || []);
+    // New data may have moved spheres / spawned tracks — keep the render
+    // loop at 60fps long enough for lerps and stale fades to settle.
+    if (typeof wake === 'function') wake(REMOVE_AFTER_MS);
     // If a device is focused, refresh the floor heatmap + the badge.
     if (focusedKey) {
       rebuildHeatmap();
@@ -2556,10 +2644,15 @@ const calStatusEl = document.getElementById('cal-status');
 const calParamsEl = document.getElementById('cal-params');
 const calRunBtn = document.getElementById('cal-run');
 
+let _calAutoCollapsed = false;
 function renderCalibration(c) {
+  const det = document.getElementById('cal-details');
+  const stateEl = document.getElementById('cal-summary-state');
   if (!c || !c.calibrated) {
     calStatusEl.textContent = 'not calibrated yet — positions use weighted centroid';
     calParamsEl.style.display = 'none';
+    if (stateEl) { stateEl.textContent = 'not calibrated'; stateEl.classList.remove('ok'); }
+    // Keep the section expanded — first-run operators need to see it.
     return;
   }
   calStatusEl.textContent = `calibrated · ${c.n_points} fit points across ${c.n_devices} devices`;
@@ -2569,6 +2662,17 @@ function renderCalibration(c) {
     `n = <b>${c.n}</b> &nbsp;·&nbsp; ` +
     `RMSE = <b>${c.rmse_dbm}</b> dB &nbsp;·&nbsp; ` +
     `fit ${Math.round(c.fit_age_s || 0)}s ago`;
+  if (stateEl) {
+    stateEl.textContent = `fit · RMSE ${c.rmse_dbm} dB`;
+    stateEl.classList.add('ok');
+  }
+  // Once a fit exists, auto-collapse so leaves get the visual priority.
+  // Only do this on the first observation per page-load — never fight the
+  // user if they've opened it manually.
+  if (det && !_calAutoCollapsed) {
+    _calAutoCollapsed = true;
+    det.open = false;
+  }
 }
 
 async function refreshCalibration() {
