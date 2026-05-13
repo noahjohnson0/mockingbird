@@ -4,9 +4,15 @@ streams from the leaves and persists them to SQLite.
 
 Wire protocol: newline-delimited JSON. Each line is one of:
   {"event":"hello","leaf":"<hostname>","version":"<fw>"}
-  {"event":"obs","mac":"AA:BB:..","rssi":-65,"addr_type":1,
+  {"event":"obs","mac":"AA:BB:..","rssi":-65,"addr_type":1,"ch":37,
    "name":"...","manuf":"....","t_ms":12345}
   {"event":"hb","up_s":42,"n_sent":1234}
+
+The "ch" field is the BLE primary advertising channel index (37/38/39),
+or 0 when the leaf can't determine it (NimBLE-Arduino 1.4.2 doesn't plumb
+this through the legacy callback path — see firmware main.cpp for the
+follow-up plan). Stored as obs.chan; nullable so older leaves that don't
+send it still work.
 
 The collector tags every record with the Pi's monotonic clock at receive,
 so analysis can correlate across leaves without trusting their millis()
@@ -104,6 +110,14 @@ def open_db() -> sqlite3.Connection:
             db.execute(f"ALTER TABLE {col_spec}")
         except sqlite3.OperationalError:
             pass
+
+    # Idempotent migration: add obs.chan (BLE primary advertising channel:
+    # 37/38/39, or NULL for legacy rows / 0 when the leaf couldn't determine
+    # it). PRAGMA table_info guard so re-runs are no-ops and we don't rely
+    # on catching a sqlite3.OperationalError that could mask other errors.
+    obs_cols = {row[1] for row in db.execute("PRAGMA table_info(obs)").fetchall()}
+    if "chan" not in obs_cols:
+        db.execute("ALTER TABLE obs ADD COLUMN chan INTEGER")
     return db
 
 
@@ -116,8 +130,8 @@ class WriteBuffer:
     """
 
     OBS_SQL = (
-        "INSERT INTO obs(ts,leaf,mac,rssi,addr_type,name,manuf,leaf_t_ms,location)"
-        " VALUES (?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO obs(ts,leaf,mac,rssi,addr_type,name,manuf,leaf_t_ms,location,chan)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)"
     )
     EVT_SQL = (
         "INSERT INTO leaf_events(ts,leaf,event,info,location) VALUES (?,?,?,?,?)"
@@ -281,6 +295,12 @@ async def handle_client(
                 ctr.leaves[leaf]["n_obs"] += 1
                 ctr.leaves[leaf]["last"] = now
                 loc = leaf_location or ctr.leaves[leaf].get("location")
+                # BLE primary adv channel: 37/38/39. Leaves that can't
+                # determine it send 0, and pre-PURU-2 firmware omits the
+                # field entirely — store NULL in both cases so analysis
+                # queries can cleanly filter on `chan IN (37,38,39)`.
+                ch_raw = msg.get("ch")
+                chan = int(ch_raw) if ch_raw in (37, 38, 39) else None
                 buf.add_obs((
                     now, leaf,
                     msg.get("mac", ""),
@@ -290,6 +310,7 @@ async def handle_client(
                     msg.get("manuf") or None,
                     msg.get("t_ms"),
                     loc,
+                    chan,
                 ))
 
             elif evt == "hb" and leaf:
