@@ -309,6 +309,12 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
     to `mockingbird-pi:9001`** (the collector). Per-leaf state on-device
     is now just a 64-entry queue + counters, no accumulation, no OOM.
     Heap stays at ~110–125 KB free under continuous heavy scanning.
+    Each `obs` line carries `mac, rssi, addr_type, ch, name, manuf, t_ms,
+    location`. `ch` is the BLE primary advertising channel (37/38/39) and
+    is `0` on leaves that can't determine it — NimBLE-Arduino 1.4.2's
+    legacy callback path doesn't expose the channel index; see firmware
+    `main.cpp` (PURU-2) for the follow-up plan. Collector stores it as
+    `obs.chan INTEGER`, nullable.
   - HTTP API on `:80` is minimal: `GET /`, `GET /version`, `POST /restart`.
     `/scan/*` is gone (the Pi has every observation continuously).
   - ArduinoOTA on UDP 3232 still works; the BLE scan pauses during OTA.
