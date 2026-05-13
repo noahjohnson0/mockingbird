@@ -306,7 +306,13 @@ need bespoke firmware beyond the existing `esp32_demo` Arduino code.
   - `mockingbird-92838c` (MAC `30:76:f5:92:83:8c`) — last seen `192.168.8.204` *(flashed 2026-05-11; Espressif OUI, not AITRIP — different batch)*
   - `mockingbird-4d4384` (MAC `8c:94:df:4d:43:84`) — last seen `192.168.8.107` *(flashed 2026-05-11)*
   - All eight **stream BLE observations as newline-delimited JSON over TCP
-    to `mockingbird-pi:9001`** (the collector). Per-leaf state on-device
+    to `mockingbird-pi:9001`** (the collector). Leaves discover the
+    collector via mDNS (`mockingbird-pi.local`, resolved against avahi on
+    the Pi with a 5 s timeout at first connect), falling back to the
+    `MOCKINGBIRD_COLLECTOR_HOST` build flag if mDNS misses. The cached IP
+    is invalidated on any connect or short-write failure, so a Pi DHCP
+    lease flip no longer silences the fleet — they re-resolve on the next
+    reconnect cycle. Per-leaf state on-device
     is now just a 64-entry queue + counters, no accumulation, no OOM.
     Heap stays at ~110–125 KB free under continuous heavy scanning.
     Each `obs` line carries `mac, rssi, addr_type, ch, name, manuf, t_ms,
