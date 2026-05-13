@@ -16,6 +16,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -41,7 +42,8 @@ HTML_PATH = Path(__file__).parent / "dashboard.html"
 PORT = 8080
 
 
-_db_cache: dict[int, sqlite3.Connection] = {}
+_db_conn: sqlite3.Connection | None = None
+_db_lock = threading.RLock()
 _db_initialized = False
 
 # Known leaves + the location label they were set to via firmware /location.
@@ -271,24 +273,30 @@ def _init_schema(db: sqlite3.Connection) -> None:
 
 
 def open_db() -> sqlite3.Connection:
-    """Per-thread cached SQLite connection. ThreadingHTTPServer reuses
-    threads via thread pool, so this is bounded. Settings tuned for
-    reading alongside the collector's writes."""
-    global _db_initialized
-    import threading
-    tid = threading.get_ident()
-    db = _db_cache.get(tid)
-    if db is None:
-        db = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
-        # Read-friendly + WAL-aware
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA synchronous=NORMAL")
-        db.execute("PRAGMA busy_timeout=2000")
-        _db_cache[tid] = db
-        if not _db_initialized:
-            _init_schema(db)
-            _db_initialized = True
-    return db
+    """Single process-wide SQLite connection, serialized by _db_lock.
+
+    Previously this cached one connection per thread.id. ThreadingHTTPServer
+    spawns a fresh thread per request (it does NOT pool), so dead threads
+    left their connections sitting in the cache pinning WAL read snapshots
+    indefinitely — that was the root of the WAL-bloat the collector papers
+    over with periodic wal_checkpoint(TRUNCATE).
+
+    Callers MUST hold _db_lock for the duration of any execute/fetch/commit
+    sequence. Handler dispatch (do_GET/do_POST/do_DELETE) and the
+    leaf-calibration loop acquire it at the boundary."""
+    global _db_conn, _db_initialized
+    if _db_conn is None:
+        with _db_lock:
+            if _db_conn is None:
+                conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=2000")
+                if not _db_initialized:
+                    _init_schema(conn)
+                    _db_initialized = True
+                _db_conn = conn
+    return _db_conn
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -313,6 +321,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def do_GET(self) -> None:
+        with _db_lock:
+            self._do_GET_locked()
+
+    def _do_GET_locked(self) -> None:
         url = urlparse(self.path)
 
         if url.path == "/":
@@ -651,6 +663,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:
+        with _db_lock:
+            self._do_POST_locked()
+
+    def _do_POST_locked(self) -> None:
         url = urlparse(self.path)
         if url.path == "/api/autodetect_phone":
             try:
@@ -804,6 +820,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, b"not found", "text/plain")
 
     def do_DELETE(self) -> None:
+        with _db_lock:
+            self._do_DELETE_locked()
+
+    def _do_DELETE_locked(self) -> None:
         url = urlparse(self.path)
         m = re.match(r"^/api/leaves/([\w\-.]+)$", url.path)
         if m:
@@ -825,7 +845,6 @@ def leaf_calibration_loop() -> None:
     and stays calibrated continuously after that, no manual button-press
     needed.
     """
-    import threading
     global CALIBRATION
     def run() -> None:
         global CALIBRATION
@@ -833,44 +852,45 @@ def leaf_calibration_loop() -> None:
         time.sleep(15)
         while True:
             try:
-                db = open_db()
-                now = time.time()
-                positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
-                    "SELECT leaf, x, y, z FROM leaf_position"
-                )}
-                # Refresh leaf-advert anchor points
-                for leaf, pos in positions.items():
-                    row = db.execute(
-                        "SELECT mac FROM obs INDEXED BY idx_obs_ts "
-                        "WHERE ts >= ? AND name = ? "
-                        "GROUP BY mac ORDER BY COUNT(*) DESC LIMIT 1",
-                        (now - LEAF_CAL_WINDOW_S, leaf),
-                    ).fetchone()
-                    if not row:
-                        continue
-                    mac = row[0]
-                    db.execute(
-                        "DELETE FROM calibration_points WHERE label = ?",
-                        (f"leaf-advert · {leaf}",),
-                    )
-                    db.execute(
-                        "INSERT INTO calibration_points("
-                        "ts_start, ts_end, mac, track_name, x, y, z, label"
-                        ") VALUES (?,?,?,?,?,?,?,?)",
-                        (now - LEAF_CAL_WINDOW_S, now, mac, "leaf-self-advert",
-                         pos[0], pos[1], pos[2], f"leaf-advert · {leaf}"),
-                    )
-                # Auto-refit the path-loss model from the refreshed anchors
-                if len(positions) >= 4:
-                    cal = mockingbird_calibration.fit_pathloss(db, positions)
-                    if cal is not None:
-                        CALIBRATION = cal
-                        sys.stderr.write(
-                            f"{time.strftime('%H:%M:%S')} auto-fit: "
-                            f"P0={cal.p0} n={cal.n} rmse={cal.rmse_dbm}dB "
-                            f"({cal.n_points}pts {cal.n_devices}anchors "
-                            f"{len(cal.per_leaf)}/8 per-leaf models)\n"
+                with _db_lock:
+                    db = open_db()
+                    now = time.time()
+                    positions = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
+                        "SELECT leaf, x, y, z FROM leaf_position"
+                    )}
+                    # Refresh leaf-advert anchor points
+                    for leaf, pos in positions.items():
+                        row = db.execute(
+                            "SELECT mac FROM obs INDEXED BY idx_obs_ts "
+                            "WHERE ts >= ? AND name = ? "
+                            "GROUP BY mac ORDER BY COUNT(*) DESC LIMIT 1",
+                            (now - LEAF_CAL_WINDOW_S, leaf),
+                        ).fetchone()
+                        if not row:
+                            continue
+                        mac = row[0]
+                        db.execute(
+                            "DELETE FROM calibration_points WHERE label = ?",
+                            (f"leaf-advert · {leaf}",),
                         )
+                        db.execute(
+                            "INSERT INTO calibration_points("
+                            "ts_start, ts_end, mac, track_name, x, y, z, label"
+                            ") VALUES (?,?,?,?,?,?,?,?)",
+                            (now - LEAF_CAL_WINDOW_S, now, mac, "leaf-self-advert",
+                             pos[0], pos[1], pos[2], f"leaf-advert · {leaf}"),
+                        )
+                    # Auto-refit the path-loss model from the refreshed anchors
+                    if len(positions) >= 4:
+                        cal = mockingbird_calibration.fit_pathloss(db, positions)
+                        if cal is not None:
+                            CALIBRATION = cal
+                            sys.stderr.write(
+                                f"{time.strftime('%H:%M:%S')} auto-fit: "
+                                f"P0={cal.p0} n={cal.n} rmse={cal.rmse_dbm}dB "
+                                f"({cal.n_points}pts {cal.n_devices}anchors "
+                                f"{len(cal.per_leaf)}/8 per-leaf models)\n"
+                            )
             except Exception:
                 import traceback; traceback.print_exc(file=sys.stderr)
             time.sleep(LEAF_CAL_REFRESH_S)
