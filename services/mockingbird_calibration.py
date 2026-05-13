@@ -514,17 +514,34 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
     leaves get more weight in the position estimate.
 
     Algorithm:
-      1. Distance estimates d_i = 10^((P0_i - rssi_i)/(10n_i)) per leaf
-      2. Variance of d_i: σ_d_i ≈ d_i · σ_i · ln(10) / (10 n_i)  (delta method)
-      3. Initial pos via weighted linearization (subtract reference eqn)
-      4. 5 Gauss-Newton iterations to converge on MLE solution
-      5. Position covariance Σ_p = (Jᵀ W J)⁻¹ from final Jacobian + weights
+      1. Bancroft-style algebraic warm start in the distance domain (one
+         shot, no iteration) using d_i = 10^((P0_i - rssi_i)/(10n_i)) as
+         the linearization point. This anchors GN in the right basin.
+      2. 2-3 Gauss-Newton iterations on the **dB-domain** log-likelihood:
+                r_i = rssi_obs_i - rssi_predicted(x; P0_i, n_i, b_rx_i)
+                w_i = 1 / sigma_i^2          (constant in dB; correct MLE
+                                              under Gaussian-in-dB noise)
+         IRLS Huber on dB residuals (k = 3 dB) for outlier rejection.
+      3. Position covariance Σ_p = (Jᵀ W J)⁻¹ from the final Jacobian.
+
+    Why dB-domain rather than distance-domain WLS:
+      The noise model is Gaussian in dB. The transform d = 10^((P0-rssi)
+      /(10n)) is exponential and biased: with σ_rssi = 5 dB and n = 2.5,
+      E[d] / d_true ≈ exp(½ (σ ln10 / 10n)²) ≈ 1.11 — i.e. an 11% radial
+      bias that pushes every position estimate systematically outward.
+      Minimizing residuals in dB removes this bias entirely; the residuals
+      are then exactly the noise variables that the model says are
+      Gaussian, and OLS on Gaussian residuals is the MLE.
 
     Returns dict with x/y/z, residual_rms, n_leaves_used, AND a 3×3 cov
     matrix `cov` that the dashboard can render as an uncertainty ellipsoid.
     """
-    # Build (position, distance, weight) tuples for each leaf
-    items: list[tuple[tuple[float, float, float], float, float]] = []
+    # Build per-leaf records carrying everything we need for both the
+    # algebraic warm start (needs a distance estimate) and the dB-domain
+    # GN refinement (needs the corrected observation + per-leaf P0, n, σ).
+    # Each record: (pos, d_init, w_db, rssi_corr, p0_i, n_i, sigma_i)
+    items: list[tuple[tuple[float, float, float], float, float,
+                       float, float, float, float]] = []
     for leaf, rssi in rssi_per_leaf.items():
         if leaf not in positions:
             continue
@@ -540,28 +557,35 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
         # correct for it. Each device's TX power gets absorbed into the
         # path-loss fit if it differs much from the calibration source.)
         rx_b = params.rx_bias.get(leaf, 0.0) if params.rx_bias else 0.0
-        corrected_rssi = rssi - rx_b
-        d_i = 10.0 ** ((p0_i - corrected_rssi) / (10.0 * n_i))
-        if not math.isfinite(d_i) or d_i <= 0 or d_i > 30:
+        rssi_corr = rssi - rx_b
+        d_init = 10.0 ** ((p0_i - rssi_corr) / (10.0 * n_i))
+        if not math.isfinite(d_init) or d_init <= 0 or d_init > 30:
             continue
-        # delta-method variance on d from σ on rssi
-        sigma_d = d_i * sigma_i * math.log(10) / (10.0 * n_i)
-        # weight = 1/variance; clamp to avoid runaway dominance by tiny σ
-        w = 1.0 / max(sigma_d * sigma_d, 0.01)
-        items.append((positions[leaf], d_i, w))
+        # dB-domain weight: w = 1/σ². Clamp σ from below to avoid one
+        # overconfident leaf dominating.
+        sig = max(sigma_i, 0.5)
+        w_db = 1.0 / (sig * sig)
+        items.append((positions[leaf], d_init, w_db, rssi_corr, p0_i, n_i, sig))
     if len(items) < 4:
         return None
 
-    # ---- Stage 1: weighted linearization ----
-    (x0, y0, z0), d0, _ = items[0]
+    # ---- Stage 1: weighted algebraic linearization (Bancroft-style) ----
+    # Subtract the first leaf's range equation from each of the others to
+    # cancel the ||p||² nonlinearity, giving a linear system in (x,y,z).
+    # We use distance-domain weights here just for the warm start — this
+    # is biased (the whole point of the ticket) but it's fast, algebraic,
+    # and lands us in the right basin for the unbiased GN below.
+    (x0, y0, z0), d0, _, _, _, _, _ = items[0]
     c0 = x0 * x0 + y0 * y0 + z0 * z0 - d0 * d0
     A: list[list[float]] = []
     b_vec: list[float] = []
     wvec: list[float] = []
-    for (xi, yi, zi), di, wi in items[1:]:
+    for (xi, yi, zi), di, _w_db, _rs, _p0, _n, _sig in items[1:]:
         A.append([2 * (x0 - xi), 2 * (y0 - yi), 2 * (z0 - zi)])
         b_vec.append(c0 - (xi * xi + yi * yi + zi * zi - di * di))
-        wvec.append(wi)
+        # warm-start weight: rough inverse-distance-variance, only used
+        # to bias the linear init towards close (high-SNR) leaves.
+        wvec.append(1.0 / max(di * di, 0.25))
     AtWA = [[0.0] * 3 for _ in range(3)]
     AtWb = [0.0, 0.0, 0.0]
     for r in range(len(A)):
@@ -574,27 +598,56 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
     if p is None:
         return None
 
-    # ---- Stage 2: weighted Gauss-Newton + IRLS (Huber) ----
-    # Classic robust regression: after each iteration, downweight any
-    # leaf whose distance residual exceeds the Huber threshold (k·σ).
-    # Without this, a single leaf with anomalous multipath (body blocking
-    # one corner, an unexpected reflection) can drag the entire MLE
-    # estimate by 1-2 m. With it, that leaf gets weighted to ~0 and the
-    # solution snaps to where the consensus of clean leaves says it is.
-    HUBER_K = 1.5  # meters of distance residual considered "still inlier"
-    iter_weights = [wi for (_pos, _d, wi) in items]
-    for it in range(6):
+    # ---- Stage 2: Gauss-Newton on the dB-domain log-likelihood ----
+    # Model:  rssi_pred(x) = P0_i - 10 n_i log10(d_i),   d_i = ||x - x_i||
+    # Residual (in dB):    r_i = rssi_obs_i - rssi_pred_i(x)
+    # Weights:             w_i = 1 / σ_i²        (constant in dB)
+    #
+    # Jacobian: with u_i = x - x_i and d_i = ||u_i||,
+    #   ∂d_i/∂x = u_i / d_i
+    #   ∂rssi_pred/∂d_i = -10 n_i / (ln(10) d_i)
+    #   ∂rssi_pred/∂x   = -10 n_i / (ln(10) d_i²) · u_i
+    # We linearize the PREDICTION (not the residual): obs ≈ pred(x) + J·dp,
+    # so J_i := ∂rssi_pred/∂x_i = -(10 n_i / (ln10 d_i²)) · (x - x_i)ᵀ.
+    # GN normal equations then read JᵀWJ · dp = JᵀW · r with r = obs - pred,
+    # and dp adds directly to x. (Sign matters — got bitten here once.)
+    #
+    # IRLS Huber on dB residuals (k = 3 dB ≈ 0.6 σ_typical) provides the
+    # same multipath-outlier robustness the distance-domain version had,
+    # but now the threshold has a unit that doesn't drift with distance.
+    LN10 = math.log(10.0)
+    # Huber threshold in dB: residuals up to k_db keep full weight, beyond
+    # get scaled by k/|r|. We want this to be ≈ 2σ — close enough to all
+    # plausible Gaussian samples that we don't asymmetrically prune the
+    # bulk, but tight enough to clip true multipath outliers (which show
+    # up as 15-25 dB residuals). With σ_RSSI in the 3-5 dB range typical
+    # for indoor BLE, 10 dB is the right operating point.
+    HUBER_K_DB = 10.0
+    irls_scale = [1.0] * len(items)  # multiplicative on base w_db
+    # Bancroft is enough; 2-3 GN steps converge in normal noise.
+    # 8 iterations max with step-norm early exit. In benign noise (σ≤3 dB)
+    # this converges in 2-3 steps; in heavy noise (σ=5 dB) the Bancroft
+    # warm start can be 2-5 m off and we sometimes need 6-8 GN steps.
+    # Cost is trivial (6×6 normal-equation builds per iteration).
+    for it in range(8):
         J: list[list[float]] = []
         r_vec: list[float] = []
         ws: list[float] = []
-        for k, ((xi, yi, zi), di, base_w) in enumerate(items):
+        for k, ((xi, yi, zi), _d_init, w_db, rssi_corr, p0_i, n_i, _sig) in enumerate(items):
             dx, dy, dz = p[0] - xi, p[1] - yi, p[2] - zi
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            dist2 = dx * dx + dy * dy + dz * dz
+            dist = math.sqrt(dist2)
             if dist < 0.05:
+                # Singular near the leaf — skip. Should be vanishingly
+                # rare since leaves are typically ≥1 m from the device.
                 continue
-            J.append([dx / dist, dy / dist, dz / dist])
-            r_vec.append(di - dist)
-            ws.append(iter_weights[k])
+            rssi_pred = p0_i - 10.0 * n_i / LN10 * math.log(dist)
+            r = rssi_corr - rssi_pred
+            # J := ∂rssi_pred/∂x = -(10n/(ln10·d²)) · (x - x_leaf)
+            jac_scale = -10.0 * n_i / (LN10 * dist2)
+            J.append([jac_scale * dx, jac_scale * dy, jac_scale * dz])
+            r_vec.append(r)
+            ws.append(w_db * irls_scale[k])
         if len(J) < 3:
             break
         JtWJ = [[0.0] * 3 for _ in range(3)]
@@ -609,21 +662,25 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
         if dp is None:
             break
         step_norm = math.sqrt(dp[0]**2 + dp[1]**2 + dp[2]**2)
+        # Trust-region clip: GN in log-space can overstep when the warm
+        # start is bad. 2 m per iteration is generous indoors.
         if step_norm > 2.0:
             scale = 2.0 / step_norm
             dp = (dp[0] * scale, dp[1] * scale, dp[2] * scale)
         p = (p[0] + dp[0], p[1] + dp[1], p[2] + dp[2])
-        # Re-weight using Huber loss BEFORE next iteration: residuals
-        # within HUBER_K keep their full weight, outside get scaled by
-        # k/|r|. This is the IRLS form of robust regression.
-        iter_weights = []
-        for k, ((xi, yi, zi), di, base_w) in enumerate(items):
+        # IRLS reweight on dB residuals at the NEW p.
+        irls_scale = []
+        for ((xi, yi, zi), _d_init, _w_db, rssi_corr, p0_i, n_i, _sig) in items:
             dx, dy, dz = p[0] - xi, p[1] - yi, p[2] - zi
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            r = abs(di - dist)
-            huber = 1.0 if r <= HUBER_K else (HUBER_K / max(r, 1e-3))
-            iter_weights.append(base_w * huber)
-        if step_norm < 0.01:
+            if dist < 0.05:
+                irls_scale.append(0.0)
+                continue
+            rssi_pred = p0_i - 10.0 * n_i / LN10 * math.log(dist)
+            r = abs(rssi_corr - rssi_pred)
+            huber = 1.0 if r <= HUBER_K_DB else (HUBER_K_DB / max(r, 1e-3))
+            irls_scale.append(huber)
+        if step_norm < 0.005:
             break
 
     # Bounds check
@@ -643,16 +700,26 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
     # "answer / no answer" cliff at exactly the wrong moment.
     cov_3x3 = _invert_3x3(_tikhonov_regularize_3x3(JtWJ)) or [[0.25, 0, 0], [0, 0.25, 0], [0, 0, 0.25]]
 
-    # Residual RMS for diagnostic
-    sq = 0.0
-    for (xi, yi, zi), di, _ in items:
+    # Residual RMS for diagnostic, reported in BOTH domains:
+    #  - rmse_db is what the MLE objective actually minimizes (use this
+    #    for goodness-of-fit checks against σ_RSSI)
+    #  - rmse_m is the distance-domain residual against the biased d_init
+    #    estimates, kept for backwards compatibility with the dashboard.
+    sq_db = 0.0
+    sq_m = 0.0
+    for (xi, yi, zi), d_init, _w_db, rssi_corr, p0_i, n_i, _sig in items:
         dist = math.sqrt((p[0]-xi)**2 + (p[1]-yi)**2 + (p[2]-zi)**2)
-        sq += (dist - di) ** 2
-    rmse = math.sqrt(sq / len(items))
+        sq_m += (dist - d_init) ** 2
+        if dist > 0.05:
+            rssi_pred = p0_i - 10.0 * n_i / LN10 * math.log(dist)
+            sq_db += (rssi_corr - rssi_pred) ** 2
+    rmse_m = math.sqrt(sq_m / len(items))
+    rmse_db = math.sqrt(sq_db / len(items))
 
     return {
         "x": p[0], "y": p[1], "z": p[2],
-        "rmse_m": rmse,
+        "rmse_m": rmse_m,
+        "rmse_db": rmse_db,
         "n_leaves_used": len(items),
         "cov": cov_3x3,  # 3×3 position covariance for uncertainty ellipsoid
     }
