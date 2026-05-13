@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import sqlite3
 import sys
 import time
@@ -394,15 +395,47 @@ async def main() -> None:
     asyncio.create_task(flush_loop(buf))
     asyncio.create_task(stats_loop(buf, ctr))
     asyncio.create_task(checkpoint_loop(buf))
-    async with server:
+
+    # Graceful shutdown on SIGINT/SIGTERM. systemd sends SIGINT
+    # (KillSignal=SIGINT in the unit) for stop; SIGTERM is the default
+    # if the unit ever changes. Either signal: stop accepting new
+    # connections, drain the buffer, exit. Open client sockets get
+    # closed when the loop tears them down.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    def _on_signal(signame: str) -> None:
+        log.info(f"received {signame}, shutting down")
+        stop.set()
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            await server.serve_forever()
+            loop.add_signal_handler(sig, _on_signal, sig.name)
+        except NotImplementedError:
+            # Windows / restricted environments — fall back to KeyboardInterrupt path.
+            pass
+
+    async with server:
+        serve_task = asyncio.create_task(server.serve_forever())
+        try:
+            await stop.wait()
         finally:
-            # Last-ditch drain on graceful shutdown.
+            # Stop accepting before draining so no new obs sneak in.
+            server.close()
+            await server.wait_closed()
+            serve_task.cancel()
             try:
-                await buf.flush()
-            except Exception:
-                log.exception("final flush failed")
+                await serve_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            # Final drain — keep retrying briefly so an in-flight flush
+            # doesn't lose the last batch under load.
+            for _ in range(3):
+                try:
+                    if await buf.flush() == 0:
+                        break
+                except Exception:
+                    log.exception("final flush failed")
+                    break
+            log.info("shutdown complete")
 
 
 if __name__ == "__main__":
