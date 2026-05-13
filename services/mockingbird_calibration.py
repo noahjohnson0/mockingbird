@@ -635,7 +635,13 @@ def mle_multilaterate(rssi_per_leaf: dict[str, int],
 
     # ---- Stage 3: position covariance Σ_p = (JᵀWJ)⁻¹ ----
     # Same JtWJ matrix from final iteration; invert it for the cov.
-    cov_3x3 = _invert_3x3(JtWJ) or [[0.25, 0, 0], [0, 0.25, 0], [0, 0, 0.25]]
+    # Tikhonov regularization: add eps*tr(M)*I to JtWJ before inversion.
+    # This is a no-op for well-conditioned matrices (eps=1e-12 of the
+    # spectral scale) but bounds the worst-case condition number when the
+    # geometry is near-degenerate (e.g., all leaves nearly co-linear).
+    # Replaces the prior |det|<1e-12 hard gate, which produced a binary
+    # "answer / no answer" cliff at exactly the wrong moment.
+    cov_3x3 = _invert_3x3(_tikhonov_regularize_3x3(JtWJ)) or [[0.25, 0, 0], [0, 0.25, 0], [0, 0, 0.25]]
 
     # Residual RMS for diagnostic
     sq = 0.0
@@ -797,3 +803,46 @@ def _solve_3x3(A: list[list[float]], b: list[float]) -> tuple[float, float, floa
             s -= M[i][j] * x[j]
         x[i] = s / M[i][i]
     return (x[0], x[1], x[2])
+
+
+# Tikhonov regularization scale. With eps_tik=1e-10, the added ridge is
+# 1e-10 * tr(M) on each diagonal entry — utterly negligible compared to
+# eigenvalues of a well-conditioned M, but enough to lift the smallest
+# eigenvalue off zero when the geometry is rank-deficient. The bound on
+# the condition number after regularization is κ(M_reg) ≤ (λ_max + eps*tr(M))
+# / (eps*tr(M)) ≈ 1/eps when M is degenerate, so κ ≤ ~1e10 — solvable in
+# double precision without catastrophic loss of significance.
+_EPS_TIKHONOV = 1e-10
+
+
+def _tikhonov_regularize_3x3(M: list[list[float]]) -> list[list[float]]:
+    """Return M + eps*tr(M)*I as a fresh 3x3. Scale-invariant: doubling M
+    doubles the ridge, so eps acts on the relative spectral scale rather
+    than an absolute threshold. Works for any symmetric PSD M (the case
+    that actually arises: JᵀWJ, innovation covariances, Fisher info)."""
+    tr = M[0][0] + M[1][1] + M[2][2]
+    # tr can be zero only if M is identically zero; in that case a
+    # vanishing ridge is correct (the solve will still fail, which is the
+    # honest answer). Use abs(tr) so we tolerate the rare numerically-
+    # negative trace from drift in a PSD update.
+    lam = _EPS_TIKHONOV * abs(tr)
+    return [
+        [M[0][0] + lam, M[0][1],       M[0][2]      ],
+        [M[1][0],       M[1][1] + lam, M[1][2]      ],
+        [M[2][0],       M[2][1],       M[2][2] + lam],
+    ]
+
+
+def _tikhonov_solve_3x3(M: list[list[float]],
+                        b: list[float]
+                        ) -> tuple[float, float, float] | None:
+    """Solve M·x = b after Tikhonov-regularizing M.
+
+    For callers that need a *solve* (not the inverse matrix), this is
+    strictly better than _solve_3x3 + det-gate: well-conditioned M passes
+    through unchanged (ridge ≈ machine-epsilon · ‖M‖), and rank-deficient
+    M yields the ridge-regression solution instead of None. The output is
+    the minimum-norm solution along the deficient directions, which is
+    the right answer when "we have no information here" is the truth.
+    """
+    return _solve_3x3(_tikhonov_regularize_3x3(M), b)
