@@ -17,3 +17,13 @@ sdkconfig.credentials
 .vscode/
 .idea/
 *.swp
+
+# Claude Code workspace artifacts (the agents themselves are tracked,
+# but worktrees and agent-memory are local-only)
+.claude/worktrees/
+.claude/agent-memory/
+
+# Python caches
+__pycache__/
+*.pyc
+.venv-test/
