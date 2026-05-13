@@ -26,6 +26,7 @@ Expected: `Active: active (running)` and recent log lines like `obs=NNNN drop=0 
 | `active (running)`, `obs=` is incrementing | It's fine. Re-check the alarm. | Done. |
 | `failed` / `inactive` | Service crashed or stopped | Step 2 |
 | `activating (auto-restart)` with rapid restarts | Crash loop | Step 2 |
+| `failed` with `Result: start-limit-hit` | Crash loop tripped the StartLimit guard (10 restarts / 120 s for collector, 5 / 300 s for dashboard). Service has given up — it will NOT auto-restart further. | Step 2, then `sudo systemctl reset-failed mockingbird-collector && sudo systemctl start mockingbird-collector` once the underlying cause is fixed. |
 | Command hangs | systemd or D-Bus stuck | Step 6 |
 
 ## 2. Service down / crash-looping

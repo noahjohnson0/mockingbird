@@ -2,6 +2,10 @@
 Description=Mockingbird 3D room dashboard (Three.js HTTP server)
 After=network-online.target mockingbird-collector.service
 Wants=network-online.target
+# Crash-loop guard. Dashboard down is lower urgency than collector down,
+# so we allow fewer retries over a longer window before giving up.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -12,6 +16,8 @@ User=pi
 Group=pi
 MemoryHigh=64M
 MemoryMax=96M
+# Sacrifice the dashboard before the collector under memory pressure.
+OOMScoreAdjust=500
 StandardOutput=journal
 StandardError=journal
 
