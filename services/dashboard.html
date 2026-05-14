@@ -160,6 +160,34 @@
   .dev-row .dev-rssi { color: #79c4ff; }
   .dev-row .dev-n { color: #6b7280; }
   .dev-row.stale { opacity: 0.4; }
+  /* Filter input above the devices list. Intentionally secondary:
+     thin border, muted background, no glow until focus. Operators
+     scanning the page should read it as "tool" not "feature". */
+  .dev-filter {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px;
+  }
+  .dev-filter-input {
+    flex: 1; min-width: 0;
+    background: #14181f; color: #cdd1d7;
+    border: 1px solid #232730; border-radius: 4px;
+    padding: 5px 8px; font-size: 11px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    outline: none;
+    transition: border-color 120ms ease, background-color 120ms ease;
+  }
+  .dev-filter-input::placeholder { color: #6b7280; }
+  .dev-filter-input:hover { border-color: #2a2e36; }
+  .dev-filter-input:focus { border-color: #1d6fef; background: #161b24; }
+  .dev-filter-count {
+    color: #6b7280; font-size: 10px; font-family: ui-monospace, monospace;
+    flex-shrink: 0; min-height: 1em;
+  }
+  .dev-row.hidden-by-filter { display: none; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
   .live-note {
     color: #6b7280; font-size: 11px; line-height: 1.5;
     padding: 10px; background: #14181f; border-radius: 4px;
@@ -588,6 +616,18 @@
   </div>
 
   <h2 style="margin-top: 14px">devices</h2>
+  <div class="dev-filter" role="search">
+    <label for="dev-filter-input" class="visually-hidden">Filter devices by MAC or name</label>
+    <input
+      type="search"
+      id="dev-filter-input"
+      class="dev-filter-input"
+      placeholder="Filter by MAC or name…"
+      autocomplete="off"
+      spellcheck="false"
+      aria-controls="live-list">
+    <span id="dev-filter-count" class="dev-filter-count" aria-live="polite" aria-atomic="true"></span>
+  </div>
   <div id="live-list">
     <div class="empty">switch to Live to start polling…</div>
   </div>
@@ -2316,6 +2356,9 @@ function ensureLiveRow(d) {
       setName(d.track_id, v);
       row.classList.toggle('named', isUserNamed(d.track_id));
       if (!v) inp.value = getName(d);  // empty → fall back to server name
+      // Keep filter haystack in sync with the new display name.
+      row.dataset.search = devSearchString(d);
+      applyDevFilter();
       refreshDeviceLabels();
     }, 350);
     inp.addEventListener('input', save);
@@ -2329,7 +2372,63 @@ function ensureLiveRow(d) {
   row.querySelector('.dev-n').textContent = nMacs > 1 ? `${nMacs}×` : `${d.n_leaves}L`;
   // Keep hover tooltip fresh as MACs accumulate
   row.title = `track ${d.track_id}\nMACs (${nMacs}):\n${(d.track_macs || []).join('\n')}`;
+  // Refresh the searchable haystack (MACs grow over time; name may change).
+  row.dataset.search = devSearchString(d);
   return row;
+}
+
+// ---- devices list filter (MAC + name substring) ----
+// Normalize MAC separators away so "8c94df" matches "8C:94:DF:…". Lowercased
+// once at write time so the input-side normalization stays cheap per keystroke.
+function devSearchString(d) {
+  const macs = (d.track_macs && d.track_macs.length ? d.track_macs : [d.mac || '']);
+  const macsNorm = macs.map(m => (m || '').toLowerCase().replace(/[:\-]/g, '')).join(' ');
+  // Include user-overridden name and server track_name; getName() returns
+  // whichever is active. autoName fallbacks (e.g., "8c94df-1234") are also
+  // useful matches when the operator types a partial code from the UI.
+  const name = (typeof getName === 'function' ? getName(d) : '') || '';
+  return (macsNorm + ' ' + name.toLowerCase());
+}
+function normalizeFilterQuery(q) {
+  // Same normalization as the haystack so "8c:94" and "8c94" both work.
+  return (q || '').toLowerCase().replace(/[:\-\s]/g, '');
+}
+const devFilterInput = document.getElementById('dev-filter-input');
+const devFilterCount = document.getElementById('dev-filter-count');
+function applyDevFilter() {
+  const raw = devFilterInput ? devFilterInput.value : '';
+  const q = normalizeFilterQuery(raw);
+  const rows = liveListEl.querySelectorAll('.dev-row');
+  const total = rows.length;
+  if (!q) {
+    rows.forEach(r => r.classList.remove('hidden-by-filter'));
+    if (devFilterCount) devFilterCount.textContent = '';
+    return;
+  }
+  let shown = 0;
+  rows.forEach(r => {
+    // dataset.search is normalized at write time; the query is normalized
+    // at read time. We additionally try a non-normalized name pass so that
+    // a query like "kitchen-sensor" with the hyphen stripped still matches
+    // a name stored with the hyphen — names can contain - and : in theory.
+    const hay = r.dataset.search || '';
+    const match = hay.includes(q) || hay.replace(/[:\-\s]/g, '').includes(q);
+    r.classList.toggle('hidden-by-filter', !match);
+    if (match) shown++;
+  });
+  if (devFilterCount) {
+    devFilterCount.textContent = `${shown} of ${total} devices`;
+  }
+}
+if (devFilterInput) {
+  devFilterInput.addEventListener('input', applyDevFilter);
+  devFilterInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && devFilterInput.value !== '') {
+      devFilterInput.value = '';
+      applyDevFilter();
+      ev.stopPropagation();
+    }
+  });
 }
 
 async function pollLive() {
@@ -2412,6 +2511,9 @@ async function pollLive() {
       for (const [tid, row] of liveRowByTrack) {
         if (!seen.has(tid)) { row.remove(); liveRowByTrack.delete(tid); }
       }
+      // Re-apply filter so newly-arrived rows are hidden if they don't match,
+      // and the "N of M" count reflects the latest data.
+      applyDevFilter();
     }
     _liveFirstPollDone = true;
   } catch (e) {
