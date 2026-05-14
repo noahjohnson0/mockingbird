@@ -2577,7 +2577,16 @@ function _liveRenderFreshness() {
 // up smoothly even when a poll is in flight or has failed.
 setInterval(_liveRenderFreshness, 500);
 
+// Persist the active tab across reloads so an operator deep in (e.g.) Setup
+// debugging calibration doesn't get bounced back to the default on refresh.
+// localStorage may throw (private browsing, file://); swallow silently.
+const _TAB_STORAGE_KEY = 'mockingbird.activeTab';
+function _persistActiveTab(name) {
+  try { localStorage.setItem(_TAB_STORAGE_KEY, name); } catch (_) { /* no-op */ }
+}
+
 function setTab(name, { focus = false } = {}) {
+  _persistActiveTab(name);
   document.querySelectorAll('.tab').forEach(t => {
     const on = t.dataset.tab === name;
     t.classList.toggle('active', on);
@@ -2740,6 +2749,20 @@ _tabEls.forEach((t, i) => {
     setTab(_tabEls[nextIdx].dataset.tab, { focus: true });
   });
 });
+
+// Restore the last-active tab from localStorage. If the stored id no
+// longer matches any current tab, drop the stale key and keep the
+// HTML-default tab (Setup). localStorage may be unavailable — swallow.
+try {
+  const stored = localStorage.getItem(_TAB_STORAGE_KEY);
+  if (stored) {
+    if (_tabEls.some(t => t.dataset.tab === stored)) {
+      setTab(stored);
+    } else {
+      localStorage.removeItem(_TAB_STORAGE_KEY);
+    }
+  }
+} catch (_) { /* no-op */ }
 
 // ---- path-loss calibration ----
 const calStatusEl = document.getElementById('cal-status');
