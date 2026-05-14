@@ -155,6 +155,14 @@
     display: flex; align-items: center; gap: 8px;
     font-family: ui-monospace, "SF Mono", monospace; font-size: 11px;
   }
+  /* Keyboard focus on the row itself (the row is the click-to-focus
+     surface — see ensureLiveRow / ensureEntityRow). The inner name
+     <input> handles its own focus separately. */
+  .dev-row:focus { outline: none; }
+  .dev-row:focus-visible {
+    outline: 2px solid #79c4ff;
+    outline-offset: 1px;
+  }
   .dev-row .dev-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .dev-row .dev-mac { color: #cdd1d7; flex: 1; }
   .dev-row .dev-rssi { color: #79c4ff; }
@@ -179,6 +187,11 @@
   .dev-filter-input::placeholder { color: #6b7280; }
   .dev-filter-input:hover { border-color: #2a2e36; }
   .dev-filter-input:focus { border-color: #1d6fef; background: #161b24; }
+  .dev-filter-input:focus-visible {
+    outline: 2px solid #79c4ff;
+    outline-offset: 1px;
+    border-color: #1d6fef;
+  }
   .dev-filter-count {
     color: #6b7280; font-size: 10px; font-family: ui-monospace, monospace;
     flex-shrink: 0; min-height: 1em;
@@ -2293,6 +2306,12 @@ function ensureEntityRow(e) {
     row.className = 'dev-row fadein' + (isEntityNamed(e.entity_id) ? ' named' : '');
     row.dataset.entity = e.entity_id;
     row.title = `entity ${e.entity_id}\n${e.n_tracks} tracks, ${e.n_tracks_used} fused`;
+    // Keyboard-accessible: row is a click target, so it must be reachable
+    // by Tab and activatable by Enter/Space. role=button so AT announces
+    // it as actionable, not just a div.
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-label', `Focus entity ${e.entity_id}`);
     row.innerHTML = `
       <span class="dev-dot" style="background:${col}; width:10px; height:10px"></span>
       <input type="text" class="dev-name" value="${name.replace(/"/g, '&quot;')}" maxlength="24">
@@ -2320,6 +2339,16 @@ function ensureEntityRow(e) {
     row.addEventListener('click', (ev) => {
       if (ev.target.tagName === 'INPUT') return;
       setFocused(e.entity_id, 'entity');
+    });
+    // Keyboard: Enter/Space activate the row, mirroring click. Ignore
+    // when focus is in the inner <input> so typing a name doesn't
+    // accidentally re-focus the entity.
+    row.addEventListener('keydown', (ev) => {
+      if (ev.target.tagName === 'INPUT') return;
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        setFocused(e.entity_id, 'entity');
+      }
     });
     row.style.cursor = 'pointer';
     document.getElementById('live-entity-list').appendChild(row);
