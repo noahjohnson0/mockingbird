@@ -438,12 +438,12 @@
 </div>
 <div id="side">
   <div class="tabs" role="tablist" aria-label="Dashboard sections">
-    <div class="tab active" data-tab="setup" role="tab" id="tab-setup"  aria-controls="setup-pane" aria-selected="true"  tabindex="0">Setup</div>
-    <div class="tab"        data-tab="live"  role="tab" id="tab-live"   aria-controls="live-pane"  aria-selected="false" tabindex="-1">Live<span class="pulse" style="display:none" id="live-pulse" aria-hidden="true"></span></div>
+    <div class="tab"        data-tab="setup" role="tab" id="tab-setup"  aria-controls="setup-pane" aria-selected="false" tabindex="-1">Setup</div>
+    <div class="tab active" data-tab="live"  role="tab" id="tab-live"   aria-controls="live-pane"  aria-selected="true"  tabindex="0">Live<span class="pulse" style="display:none" id="live-pulse" aria-hidden="true"></span></div>
     <div class="tab"        data-tab="stats" role="tab" id="tab-stats"  aria-controls="stats-pane" aria-selected="false" tabindex="-1">Stats</div>
   </div>
 
-<div class="pane active" id="setup-pane" role="tabpanel" aria-labelledby="tab-setup" tabindex="0">
+<div class="pane" id="setup-pane" role="tabpanel" aria-labelledby="tab-setup" tabindex="0" hidden>
   <h1>mockingbird · room</h1>
   <div class="sub">Origin (0,0,0) = bedroom corner. <kbd>x</kbd> along one wall, <kbd>y</kbd> the perpendicular, <kbd>z</kbd> height. All in metres.</div>
 
@@ -583,7 +583,7 @@
   </div>
 </div><!-- /setup-pane -->
 
-<div class="pane" id="live-pane" role="tabpanel" aria-labelledby="tab-live" tabindex="0" hidden>
+<div class="pane active" id="live-pane" role="tabpanel" aria-labelledby="tab-live" tabindex="0">
   <h1>live · device tracking</h1>
   <div class="sub">Apple-fingerprint devices seen by ≥2 positioned leaves in the last 8 s, weighted-centroid positioned. Refreshes 2×/sec.</div>
 
@@ -2752,7 +2752,7 @@ _tabEls.forEach((t, i) => {
 
 // Restore the last-active tab from localStorage. If the stored id no
 // longer matches any current tab, drop the stale key and keep the
-// HTML-default tab (Setup). localStorage may be unavailable — swallow.
+// HTML-default tab (Live). localStorage may be unavailable — swallow.
 try {
   const stored = localStorage.getItem(_TAB_STORAGE_KEY);
   if (stored) {
