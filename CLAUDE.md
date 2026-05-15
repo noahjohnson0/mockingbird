@@ -146,7 +146,7 @@ Tailscale ships ~67 MB of binaries; the Opal has ~40 MB free flash.
   the SD adapter — **the lock switch is now super-glued to the unlocked
   position**, so reflashing always works now)
 - Hostname: `raspberrypi` on the LAN, `mockingbird-pi` on the tailnet
-- LAN: `wlan0` on Mockingbird, `192.168.8.202/24` (DHCP — may renumber) <!-- VERIFY: Macca to either reserve DHCP lease on the Opal for the Pi's MAC, or move leaves to mDNS hostname `mockingbird-pi.local`; then change this to "static reservation" -->
+- LAN: `wlan0` on Mockingbird, currently `192.168.8.202/24` via DHCP; the decision is **belt-and-braces**: leaves discover the collector via mDNS (`mockingbird-pi.local`) as the canonical path (cache-invalidated on connect failure, so a renumber self-heals), AND the Opal is to hold a static DHCP reservation for the Pi's `wlan0` MAC as the safety net. <!-- VERIFY: Macca — apply the DHCP reservation on the Opal next time on the Mockingbird LAN (runbook: docs/ops/runbooks/pi-dhcp-reservation.md). Once applied, drop this VERIFY and change the line to read `static DHCP reservation on the Opal, currently 192.168.8.202`. -->
 - **Tailscale**: `mockingbird-pi` at `100.73.232.63` (IPv4) /
   `fd7a:115c:a1e0::4d38:e83f` (IPv6) — *verified 2026-05-13 after Pi
   reflash to Trixie; the older `100.83.26.55` from the Bookworm install
