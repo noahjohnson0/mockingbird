@@ -81,11 +81,207 @@ The mesh produces continuous, accurate household telemetry, and nobody is readin
 - **Then** a "Leaf offline: mockingbird-4ce184" push is sent (severity warning, respects quiet hours)
 - **And** when the leaf reconnects, a follow-up "Leaf back online" push is sent
 
+## Design (Ethan, 2026-05-14)
+
+Owning this end-to-end. Pinning the four things Sophie asked me to nail
+down: alert sources, anomaly model, notification path, service ownership.
+
+### Alert sources — exactly four event signals, all already in the DB
+
+Every rule fires off one of four signals. Three are existing rows; one
+is derived. No new event production paths, only consumption.
+
+| Signal | Source | Latency floor |
+|---|---|---|
+| `person_appearance` row inserted | `services/mockingbird_tracks.py` writes these when entity clustering promotes a multi-MAC track to a stable identity | ~1-2 s after BLE obs |
+| `person_appearance` row absent for ≥ N min | derived: `SELECT MAX(ts) FROM person_appearance WHERE cluster_id=?` polled every 30 s | poll period (30 s) |
+| `leaf_events` row with `event='tamper'` | depends on [[imu-on-leaves]] | ~3 s (tamper detector window) |
+| Leaf heartbeat staleness | derived: `SELECT MAX(ts) FROM leaf_events WHERE leaf=? AND event='hb'` polled every 60 s | poll period (60 s) |
+
+The alerter is a **pure SQL consumer** — it does not subscribe to the
+TCP stream, hook the collector, or share any process state. This is
+the right architectural call for three reasons:
+
+1. **Crash isolation.** The collector's job is "don't lose
+   observations." A buggy alerter must not be able to block, slow, or
+   crash the collector. Separate process + DB-only IPC gives us that
+   for free.
+2. **Idempotent replay.** Watermark stored in the alerter's own state
+   table (`alerter_watermark(rule, last_ts)`). On restart, replay from
+   watermark forward. If an alert was already sent, the `cooldown`
+   check de-dupes it. Cost: one `SELECT` per rule per tick.
+3. **Trivial to test.** Feed it a synthetic SQLite file, assert on the
+   `alerts_sent` table and the (mocked) Pushover POST. No need for a
+   live mesh in CI.
+
+### Anomaly model — start dumb, earn complexity
+
+V1 is **rule-based, not learned.** Four hand-tuned thresholds:
+
+```
+ARRIVAL          : person_appearance after ≥ 30 min absence
+DEPARTURE        : no person_appearance in any cluster ≥ 10 min,
+                   after ≥ 1 h of presence
+TAMPER           : any leaf_event kind='tamper'  (critical, bypasses quiet hours)
+LEAF_OFFLINE     : no hb in 5 min  (warning, respects quiet hours)
+```
+
+I considered three more sophisticated models and explicitly rejected
+them for v1:
+
+- **Per-cluster Poisson presence model with a Bayesian threshold.**
+  Right answer for "is this arrival time unusual?" (e.g. Noah is
+  home at 3 AM on a Tuesday — anomaly), but it needs ≥ 2 weeks of
+  labeled data per cluster to fit. We don't have that yet. Defer to
+  v2 once the 2-week trial is logged.
+- **HMM over presence/absence with state-dependent emission rates.**
+  Strictly better for empty-house debouncing than the 10-min
+  threshold, but the threshold is good enough for v1 and the HMM
+  needs labeled training data we don't have.
+- **Anomaly detection on dwell-location distribution per cluster.**
+  Cool but premature — v1's value is "you know when people arrive
+  and leave," not "you know when their routine deviates."
+
+The architectural punchline: the rule-evaluation function takes a
+`(rule_config, db_snapshot, now) -> list[Alert]` shape. Swapping the
+threshold for a learned model in v2 is one function replacement, no
+plumbing churn.
+
+### Notification path — Pushover for v1, abstraction-thin so it isn't sticky
+
+Three transport options were on the table:
+
+| Transport | Pros | Cons |
+|---|---|---|
+| **Pushover** | Rock-solid delivery, supplementary URLs for feedback loop, one-time $5/platform, no auth dance | Vendor lock-in, costs money |
+| **ntfy.sh** (self-hosted on Pi) | Free, OSS, runs locally | Self-hosted = another systemd unit, another point of failure on the Pi; iOS push needs paid forwarder anyway |
+| **HomeAssistant companion** | Free, OSS, already on Noah's phone presumably | Forces installing HA, more moving parts than alerts deserve |
+
+**Recommendation: Pushover.** $10 one-time (iOS + Android), survives
+Pi reboots and tailnet hiccups (Pushover's servers do the retry, not
+us), and the supplementary URL feature is exactly the feedback loop
+we need. Worth $10 to not own a push gateway.
+
+Abstraction shape: `services/mockingbird_alerter/transports.py`
+exposes a `Transport.send(alert) -> delivery_id` protocol. Pushover is
+one implementation, ntfy.sh is a 30-LOC fallback we keep stubbed but
+disabled. Swapping is one config-line change.
+
+The HTTPS POST to api.pushover.net **MUST egress through the Pi's
+direct internet route, not the tailnet**. The tailnet is for inbound
+(Noah's phone tapping the supplementary URL); outbound to Pushover
+goes via the Opal's WAN to entropy. Verified in the topology in
+CLAUDE.md.
+
+### Service ownership — new `mockingbird-alerter.service` systemd unit
+
+New systemd unit `services/mockingbird-alerter.service`. Python entry
+at `services/mockingbird-alerter.py`. Mirrors the collector's
+hardening choices (MAC-2 conventions):
+
+```
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /home/pi/mockingbird/services/mockingbird-alerter.py
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+MemoryHigh=64M
+MemoryMax=96M
+OOMScoreAdjust=-300
+StandardOutput=journal
+StandardError=journal
+```
+
+Memory budget is half the collector's (collector handles 100+ obs/s of
+live TCP; the alerter polls SQL every 30 s and does a few HTTPS
+POSTs/day). The crash-loop guard is tighter (5 restarts in 60 s, vs
+the collector's 5 in 5 min) because if the alerter is crashlooping,
+silence is correct behavior — the collector keeps recording, we just
+miss notifications until human intervention. **The alerter must never
+take the collector down with it.** Separate process is the structural
+guarantee of that.
+
+DB access is **read-only with shared cache**, two-second busy timeout:
+
+```python
+sqlite3.connect(f"file:{db_path}?mode=ro&cache=shared", uri=True, timeout=2.0)
+```
+
+This means the alerter cannot accidentally write to the obs table or
+hold a write lock that stalls the collector. Its own state
+(`alerter_watermark`, `alerts_sent`, `feedback`, `alerts_suppressed`)
+goes in a separate SQLite file `~/mockingbird/alerter.sqlite` —
+small, blast-radius-limited, can be wiped to reset state without
+touching observations.
+
+### Schema additions (in `alerter.sqlite`, not `observations.sqlite`)
+
+```sql
+CREATE TABLE alerter_watermark (rule TEXT PRIMARY KEY, last_ts REAL NOT NULL);
+CREATE TABLE alerts_sent (
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    rule TEXT NOT NULL,
+    severity TEXT NOT NULL,            -- 'info' | 'warning' | 'critical'
+    cluster_id TEXT,                   -- nullable, populated for arrival/departure
+    leaf TEXT,                         -- nullable, populated for tamper/offline
+    body TEXT NOT NULL,                -- the human-readable message
+    delivery_id TEXT,                  -- Pushover receipt
+    cancelled INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_alerts_rule_ts ON alerts_sent(rule, ts);
+CREATE TABLE alerts_suppressed (
+    ts REAL NOT NULL, rule TEXT, reason TEXT, body TEXT
+);
+CREATE TABLE feedback (
+    alert_id INTEGER NOT NULL,
+    rating TEXT NOT NULL,              -- 'up' | 'down'
+    ts REAL NOT NULL,
+    PRIMARY KEY (alert_id, ts)
+);
+```
+
+The feedback HTTP endpoint (Scenario 5) does **not** go on the
+alerter — it goes on `mockingbird-dashboard.service` as a new
+`POST /api/feedback/<alert_id>/<thumbs>` handler that writes to
+`alerter.sqlite`. The dashboard already terminates HTTPS via
+tailscale-serve and already has tailnet auth; making the alerter
+listen on a port would double the attack surface for no benefit.
+
+### Latency budget
+
+P95 target: ≤ 30 s from event detection to phone vibration. Decomposed:
+
+| Stage | Budget | Notes |
+|---|---|---|
+| Event row written → alerter SELECT sees it | ≤ 30 s | poll period for live-row rules; 60 s for derived "absence" rules |
+| Rule evaluation + cooldown check | ≤ 10 ms | in-memory dict + one indexed SELECT |
+| Pushover HTTPS POST | ≤ 1.5 s | observed P95 from Pi over entropy WAN; measured during dashboard work |
+| Pushover → phone push | ≤ 5 s | Pushover's SLA |
+| **Total P95** | **≤ ~40 s** for derived absence rules; **~15 s** for live rules |
+
+The 30 s target is achievable for arrival/tamper (live rules) but
+**tight for empty-house/leaf-offline** (derived from absence). I'd
+rather meet 15 s on the rules people actually care about (arrivals,
+tamper) than miss it across the board chasing 30 s. Calling this a
+documented trade-off, not a missed target — Sophie to ratify in PRD
+review.
+
 ## Open questions
 
-- Pushover vs ntfy.sh vs HomeAssistant — Pushover is paid but rock-solid; ntfy.sh is free + open-source. **Owner: Sophie + Noah, decide by 2026-05-20.**
-- Do empty-house alerts depend on Phase 3 person labels (so we don't alarm on every visitor leaving)? Or does Phase 1 cluster-level "any-known-cluster present" suffice? **Owner: Wanjiru, propose by 2026-05-22.** Lean: Phase 1 is enough for v1.
-- How do we test arrival without staging a real walk-out / walk-in? **Owner: Andy (SDET), propose a replay harness by 2026-05-22** (likely shared with [[person-fingerprinting-phase-1-2]]).
+- Pushover vs ntfy.sh vs HomeAssistant — recommending **Pushover** per the
+  notification-path analysis above. **Owner: Sophie + Noah, ratify by 2026-05-20.**
+- Do empty-house alerts depend on Phase 3 person labels? Phase 1 cluster-level
+  "any-known-cluster present" is sufficient for v1; visitor-driven false
+  positives are acceptable in the 2-week trial because they generate the
+  feedback signal we need. **Owner: Wanjiru, ratify by 2026-05-22.** Lean: yes.
+- How do we test arrival without staging a real walk-out / walk-in? **Owner:
+  Andy (SDET), propose a replay harness by 2026-05-22** — replaying a saved
+  observations.sqlite snapshot through the alerter with mocked Pushover is
+  the cheap path (the alerter is already a pure SQL consumer by design, so
+  this is just "point it at a different DB file").
 
 ## Timeline & owners
 
