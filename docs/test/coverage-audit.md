@@ -1,26 +1,51 @@
-# mockingbird — Test Coverage Audit (ANDY-1)
+# mockingbird — Test Coverage Audit
 
 **Auditor:** Andy (SDET)
-**Branch:** `andy/test-audit`
-**Date:** 2026-05-13
+**Initial branch:** `andy/test-audit` (ANDY-1, 2026-05-13)
+**Last refresh:** 2026-05-14 (ANDY-3)
 **Scope:** services/ (Pi-side Python), scripts/ (analysis tooling), firmware/esp32-wroom-mockingbird/ (testable C++ surface)
+
+## Refresh history
+
+- **2026-05-13 (ANDY-1):** initial audit. Zero tests in repo. Top 3 P0
+  starter tests landed: `test_calibration_solvers.py`,
+  `test_calibration_pathloss.py`, `test_tracks_smoothing.py`.
+- **2026-05-13 (ANDY-2):** numerical-stability tests added
+  (`test_numerical_stability.py`) covering ESZ-3 Joseph-form Kalman update
+  and Tikhonov-regularized 3×3 solves.
+- **2026-05-13 (ANDY-2 cont.):** wire-format contract + canary tests
+  (`test_wire_contract.py`) pinning firmware↔collector JSON shape.
+- **2026-05-13 (ESZ-4):** dB-domain MLE multilateration test suite
+  (`test_calibration_dbmle.py`) — Jacobian correctness, noise-free
+  recovery, bias under nominal noise, head-to-head vs distance-domain,
+  per-leaf σ plumbing.
+- **2026-05-14 (ANDY-3):** kalman_step + ZUPT tests added. See section 6.
 
 ---
 
 ## TL;DR
 
-**There are zero tests in this repository.** ~4800 lines of production Python
-(collector, calibration math, tracks/Kalman fusion, dashboard) plus ~500
-lines of firmware ship with no automated verification of any kind. The
-position-fusion math has been iterated on aggressively (the last 5 commits
-are all centroid/MLE/Kalman tuning) with manual eyeball validation against
-the live dashboard as the only signal. **This is the highest-risk part of
-the codebase** — silent regressions in `multilaterate`, `mle_multilaterate`,
-or `kalman_step` will produce wrong positions that look plausible, and
-nothing will flag the drift.
+**Started at zero, currently at 91 passing tests across 7 files** covering
+the path-loss model inversion, multilateration (both Gauss-Newton and
+dB-MLE), the linear-algebra solver primitives, Joseph-form Kalman and
+Tikhonov regularization, the smoothing/sanity-check primitives,
+kalman_step's first-call init and >5m teleport guard (ANDY-3), the ZUPT
+stationary detector (ANDY-3), the firmware↔collector wire contract, and
+EDA-script smoke. The position-fusion math is the differentiator and the
+test pyramid is now densest there — exactly the right shape.
 
-Three starter tests landed in this branch cover the worst gaps; see
-`tests/` and section 5.
+**Still uncovered, by design or by waiting:**
+- The collector itself (`mockingbird-collector.py`) — entirely untested
+  because the hyphenated filename blocks `import`. The fix is a one-line
+  rename, recommended below. P0 paths inside that file (WriteBuffer
+  column order, hello-before-obs guard, MAX_LINE drop) remain at risk.
+- The full `kalman_step` Joseph update + ZUPT-snap branch (lines ~290–345)
+  is only indirectly exercised. The audit's call is that the *load-bearing
+  guards* (first-call init, >5m teleport, corrupt-state re-init,
+  stationary detector) are now pinned; the steady-state smoothing math
+  is correctness-checked by the dB-MLE bias suite at the system level.
+- Firmware C++ paths beyond the wire contract still need a host-side
+  rig (see section 2, firmware row).
 
 ---
 
@@ -186,6 +211,98 @@ python3 -m pip install --user pytest
 cd ~/repos/mockingbird
 python3 -m pytest tests/ -v
 ```
+
+## 6. ANDY-3 refresh (2026-05-14)
+
+Re-ran the suite (91/91 green) and diffed the audit's "uncovered" list
+against the current state of `services/mockingbird_tracks.py`,
+`services/mockingbird_calibration.py`, and `services/mockingbird-collector.py`.
+
+### What changed in the services since 2026-05-13
+
+- `mockingbird_calibration.py`: `mle_multilaterate` switched to a
+  dB-domain log-likelihood (ESZ-4). New helpers `_tikhonov_regularize_3x3`
+  and `_tikhonov_solve_3x3` introduced for ESZ-3. **All covered** by
+  `test_calibration_dbmle.py` and `test_numerical_stability.py`.
+- `mockingbird_tracks.py`: `kalman_step` now uses Joseph-form covariance
+  updates via `_joseph_update` (ESZ-3), Tikhonov-regularized innovation
+  inversion via `_tikhonov_regularize_3x3_local` / `_invert_3x3_local`,
+  and an adaptive-ZUPT-with-stationary-anchor branch. The numerical
+  primitives are covered by `test_numerical_stability.py`; the
+  high-level control flow inside `kalman_step` was untested until
+  ANDY-3 (see below).
+- `mockingbird-collector.py`: PURU-2 added an `obs.chan INTEGER` column
+  and the `ch` field on the wire (covered by `test_wire_contract.py`).
+  ETH-2 added the crash-loop guard, OOM bias, MemoryHigh/Max limits, and
+  graceful SIGINT shutdown — these are systemd-unit behavior, not unit-
+  testable in Python; flagged below as deliberately skipped.
+
+### Top 3 highest-risk uncovered branches — tests added
+
+Picked by re-ranking the audit's P0/P1 list against the current code:
+
+1. **`kalman_step` first-call initialization**
+   `test_kalman_step_first_call_initializes_state_to_measurement_with_zero_velocity`.
+   Pins that the first call returns the measurement exactly, seeds
+   state to `[x,y,z,0,0,0]`, and stamps `kf_last_t`. Catches any
+   refactor that averages against a nonexistent prior on first call —
+   would silently bias every track's opening position toward 0.
+2. **`kalman_step` >5m teleport re-init**
+   `test_kalman_step_large_jump_triggers_reinit_not_smoothing`.
+   Pins that a >5m jump re-seeds state at the new measurement instead
+   of smoothing. The audit's P0 #19 — without this, a teleport averages
+   into the prior and locks the track at the wrong point for ~10 ticks.
+3. **`_is_stationary` ZUPT gate (three single-purpose tests)**
+   `test_is_stationary_returns_false_with_fewer_than_history_n_points`,
+   `test_is_stationary_returns_true_for_tight_cluster_inside_radius`,
+   `test_is_stationary_returns_false_when_any_point_exceeds_radius`.
+   Pins the three branches of the function: insufficient-history gate,
+   true-positive cluster, false-positive outlier rejection. Catches a
+   `> r2` ↔ `>= r2` flip or a dropped squaring.
+
+Shared fixtures in `tests/conftest.py`: `fresh_track` (Track factory
+with no Kalman state) and `trail_at` (TrailPoint list from xyz tuples).
+DRY without hiding the preconditions — each test's Arrange block still
+declares its own geometry explicitly.
+
+### Deliberately not tested (with reason)
+
+These are uncovered branches that I considered and chose not to write
+tests for. Documented so a future audit doesn't re-litigate the call.
+
+- **`codename_for` collision rate (P2 #21).** Cosmetic UX bug, not a
+  correctness bug. The 2-char suffix math is obvious from inspection;
+  a property test would chase a sub-1% target with flaky thresholds.
+  Skip until/unless a real collision report comes in.
+- **`_invert_3x3_local` and `_tikhonov_regularize_3x3_local` in
+  `mockingbird_tracks.py` (duplicates of the calibration versions).**
+  Same code, copy-pasted to avoid a cross-module import cycle. The
+  calibration copies are covered by `test_numerical_stability.py` and
+  `test_calibration_solvers.py`. A redundant test of the duplicates
+  would catch a copy-paste drift but is cheap to add only after one
+  occurs — flag for the next refresh.
+- **`kalman_step` steady-state smoothing math (predict + Joseph
+  update + ZUPT snap).** Indirectly covered: the dB-MLE bias suite
+  (`test_db_mle_bias_under_5cm_with_3db_noise`) is a system-level test
+  that a smoothing regression would flunk. A direct test of the
+  6×6 predict/update would need to reconstruct the F·P·Fᵀ + Q
+  arithmetic in the test — duplicating production math in the test,
+  which doesn't catch coordinated regressions. Better leverage is to
+  add a small *integration* test that drives kalman_step with a
+  synthetic noisy walk and asserts position error stays bounded. Filed
+  as a follow-up rather than a P0 today.
+- **`_is_stationary_tuples`.** Trivial alias of `_is_stationary` with
+  one different access pattern (`p[0]` vs `p.x`). If `_is_stationary`
+  is correct, this is too. A one-line parametrize would catch a
+  copy-paste drift but is low-leverage. Skip.
+- **ETH-2 systemd hardening (crash-loop guard, memory limits,
+  graceful SIGINT).** Not unit-testable from Python; would need a
+  process-level integration rig that boots the service under systemd.
+  These behaviors are validated by the deployment script and journal
+  inspection, not by pytest. Skip — wrong test pyramid layer.
+- **The five collector P0/P1 tests (#8, #9, #10, #16, #17, #18).**
+  Still blocked on the `mockingbird-collector.py` → `mockingbird_collector.py`
+  rename. Filed against the next collector-touching PR.
 
 If imports fail because `services/` isn't on `sys.path`, the test files
 prepend it themselves (see top of each file). The hyphen in the

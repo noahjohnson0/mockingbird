@@ -205,3 +205,88 @@ def test_joseph_matches_short_form_at_optimal_gain():
     for i in range(6):
         for j in range(6):
             assert abs(P_short[i][j] - P_joseph[i][j]) < 1e-9
+
+
+def test_joseph_psd_under_asymmetric_random_gain():
+    """Joseph form must remain symmetric AND PSD even with a Kalman gain
+    that has no special structure (no symmetry, no relation to any
+    "optimal K"). This locks in the unconditional-PSD guarantee — if a
+    future change ever drops the symmetrization at the end of
+    `_joseph_update`, this test will catch it (the matrix multiplications
+    accrue O(eps) asymmetry per step, which compounds to visible
+    asymmetry over hundreds of iterations)."""
+    import random
+    rng = random.Random(42)
+    P = [[1.0 if i == j else 0.0 for j in range(6)] for i in range(6)]
+    R = [[0.25 if i == j else 0.0 for j in range(3)] for i in range(3)]
+    K = [[rng.uniform(-0.2, 0.4) for _ in range(3)] for _ in range(6)]
+    for _ in range(300):
+        P = _joseph_update(P, K, R)
+    # Exact symmetry (we explicitly average + assign).
+    for i in range(6):
+        for j in range(6):
+            assert P[i][j] == P[j][i]
+    # All diagonals strictly positive.
+    for i in range(6):
+        assert P[i][i] > 0.0
+    # 3×3 position-block leading principal minor non-negative.
+    a, b, c = P[0][0], P[0][1], P[0][2]
+    d, e, f = P[1][0], P[1][1], P[1][2]
+    g, h, ii = P[2][0], P[2][1], P[2][2]
+    det3 = a * (e * ii - f * h) - b * (d * ii - f * g) + c * (d * h - e * g)
+    assert det3 > -1e-9
+
+
+def test_leaf_bias_decomposition_is_identifiable_up_to_gauge():
+    """The additive model r_{AB} = TX_A + RX_B has a one-parameter gauge:
+    adding c to every TX and subtracting c from every RX leaves the
+    residuals invariant. `_fit_leaf_biases` anchors the gauge by enforcing
+    mean(TX) = 0 per ALS iteration. With that anchor the fixed point is
+    unique. This test reproduces the ALS loop on synthetic ground truth
+    and checks that:
+      (a) recovered TX matches true TX (which was already mean-zero) within
+          noise,
+      (b) recovered RX matches true RX up to a global constant (gauge),
+          i.e. (recovered_RX - true_RX) is the SAME for every leaf.
+    Without the mean(TX) = 0 anchor the solution drifts arbitrarily."""
+    import random
+    rng = random.Random(0)
+    leaves = ["A", "B", "C", "D"]
+    true_tx = {"A": 2.0, "B": -1.0, "C": 0.5, "D": -1.5}     # already mean-zero
+    true_rx = {"A": 1.0, "B": 3.0, "C": -0.5, "D": -0.5}     # mean = 0.75
+    residuals = []
+    for tx in leaves:
+        for rx in leaves:
+            if tx == rx:
+                continue
+            residuals.append((tx, rx, true_tx[tx] + true_rx[rx] + rng.gauss(0, 0.05)))
+    # Replicate the ALS loop from _fit_leaf_biases exactly.
+    tx_bias = {l: 0.0 for l in leaves}
+    rx_bias = {l: 0.0 for l in leaves}
+    for _ in range(20):
+        new_tx = {l: [] for l in leaves}
+        for tx, rx, r in residuals:
+            new_tx[tx].append(r - rx_bias.get(rx, 0.0))
+        for l in tx_bias:
+            if new_tx[l]:
+                tx_bias[l] = sum(new_tx[l]) / len(new_tx[l])
+        m = sum(tx_bias.values()) / len(tx_bias)
+        for l in tx_bias:
+            tx_bias[l] -= m
+        new_rx = {l: [] for l in leaves}
+        for tx, rx, r in residuals:
+            new_rx[rx].append(r - tx_bias.get(tx, 0.0))
+        for l in rx_bias:
+            if new_rx[l]:
+                rx_bias[l] = sum(new_rx[l]) / len(new_rx[l])
+    # (a) Recovered TX is mean-zero AND close to true TX.
+    assert abs(sum(tx_bias.values())) < 1e-9
+    for l in leaves:
+        assert abs(tx_bias[l] - true_tx[l]) < 0.1
+    # (b) Recovered RX matches true RX up to a single global constant
+    #     across all leaves. Compute (recovered - true) per leaf and
+    #     check the spread is tight (the constant offset itself can be
+    #     anything; we care that it's the SAME for every leaf).
+    diffs = [rx_bias[l] - true_rx[l] for l in leaves]
+    spread = max(diffs) - min(diffs)
+    assert spread < 0.1, f"rx diffs not constant across leaves: {diffs}"

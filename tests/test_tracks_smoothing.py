@@ -2,24 +2,32 @@
 
 Behaviors covered:
   - test_smooth_alpha_returns_max_for_tiny_jump
-        Below SMOOTH_JUMP_SOFT, the smoothing weight = MAX (trust the
-        measurement fully — barely smooth)
   - test_smooth_alpha_returns_min_for_huge_jump
-        Above SMOOTH_JUMP_HARD, the weight = MIN (suspect the measurement
-        — smooth heavily)
   - test_smooth_alpha_is_monotonically_decreasing_between_soft_and_hard
-        Strictly non-increasing as jump magnitude grows from SOFT to HARD
   - test_kf_state_corrupt_flags_nonfinite_value
   - test_kf_state_corrupt_flags_huge_position
   - test_kf_state_corrupt_flags_huge_velocity
   - test_kf_state_corrupt_passes_plausible_state
-        Normal values pass the guard.
   - test_clamp_pos_cov_diagonal_clamped_to_min_and_max
   - test_clamp_pos_cov_symmetrizes_offdiagonal
   - test_clamp_pos_cov_limits_correlation_magnitude
 
-These five primitives are the "stationary phones don't fly through walls"
-safety net. Each is a pure function — no fixtures needed.
+ANDY-3 additions (2026-05-14): closing the highest-risk uncovered branches
+flagged in docs/test/coverage-audit.md after the ESZ-3/ESZ-4 landings.
+
+  - test_kalman_step_first_call_initializes_state_to_measurement_with_zero_velocity
+        Pins the first-call init path — measurement returned as-is, state
+        seeded to [x,y,z,0,0,0]. A bug here means every track starts wrong.
+  - test_kalman_step_large_jump_triggers_reinit_not_smoothing
+        A >5m jump must re-seed state to the new measurement instead of
+        averaging with the prior estimate (which would lock the track on
+        a wrong point for ~10 ticks).
+  - test_is_stationary_returns_false_with_fewer_than_history_n_points
+  - test_is_stationary_returns_true_for_tight_cluster_inside_radius
+  - test_is_stationary_returns_false_when_any_point_exceeds_radius
+        Pins the ZUPT gate. An off-by-one between radius_m and radius_m²
+        (the production code stores radius_m and squares it for comparison
+        against squared distances) silently inverts the threshold.
 """
 from __future__ import annotations
 
@@ -32,9 +40,12 @@ from mockingbird_tracks import (
     SMOOTH_ALPHA_MIN,
     SMOOTH_JUMP_HARD,
     SMOOTH_JUMP_SOFT,
+    ZUPT_HISTORY_N,
     _clamp_pos_cov,
+    _is_stationary,
     _kf_state_looks_corrupt,
     _smooth_alpha,
+    kalman_step,
 )
 
 
@@ -186,3 +197,126 @@ def test_clamp_pos_cov_limits_correlation_magnitude():
     assert abs(corr) <= 0.95 + 1e-9, (
         f"correlation {corr:.4f} exceeds 0.95 cap"
     )
+
+
+# ---------- kalman_step (ANDY-3) ----------
+#
+# kalman_step is the function every position estimate flows through after
+# multilateration. The audit flagged the first-call init and the >5m
+# teleport guard as P0 paths that had no direct test. These two pin the
+# behaviors a refactor is most likely to break.
+
+def test_kalman_step_first_call_initializes_state_to_measurement_with_zero_velocity(fresh_track):
+    # Arrange — brand-new Track with no kf_state yet.
+    track = fresh_track(now=1_000_000.0)
+    measurement = (2.5, 3.0, 1.5)
+    now = 1_000_000.0
+
+    # Act — first call must seed state from the measurement.
+    returned = kalman_step(track, measurement, meas_cov_3x3=None, now=now)
+
+    # Assert — returned position equals measurement exactly (no smoothing
+    # against a non-existent prior), state is [x,y,z,0,0,0], and kf_last_t
+    # is stamped so the next call's dt is computable. This is the
+    # invariant the audit calls out: any "clever" change that averages
+    # against a prior on the first call would silently bias every track's
+    # opening position toward (0,0,0).
+    assert returned == measurement
+    assert track.kf_state is not None, "first call must initialize kf_state"
+    assert track.kf_state[0:3] == [measurement[0], measurement[1], measurement[2]]
+    assert track.kf_state[3:6] == [0.0, 0.0, 0.0], (
+        f"first-call velocity must be exactly zero, got {track.kf_state[3:6]}"
+    )
+    assert track.kf_last_t == now
+
+
+def test_kalman_step_large_jump_triggers_reinit_not_smoothing(fresh_track):
+    # Arrange — a track that has been sitting at (0,0,1) for one step,
+    # then receives a measurement 10m away. The >5m guard must re-init
+    # the filter at the new measurement; otherwise the Kalman update
+    # averages prior and new and the track gets stuck halfway between
+    # them for ~10 ticks (visible to the user as a track teleporting
+    # through walls and then crawling toward its real location).
+    track = fresh_track(now=1_000_000.0)
+    near = (0.0, 0.0, 1.0)
+    kalman_step(track, near, meas_cov_3x3=None, now=1_000_000.0)  # seed
+    # Sanity: state seeded near the origin.
+    assert track.kf_state[0:3] == [0.0, 0.0, 1.0]
+    far = (10.0, 10.0, 1.0)  # ~14.1 m away — well past the 5 m threshold
+
+    # Act
+    returned = kalman_step(track, far, meas_cov_3x3=None, now=1_000_000.5)
+
+    # Assert — on re-init the function returns the new measurement
+    # verbatim (same contract as a brand-new track), and state is reseeded
+    # there with zero velocity. A bug that DROPPED the >5m guard would
+    # instead return a point between `near` and `far` and leave a
+    # non-zero velocity in the state.
+    assert returned == far, (
+        f"large jump must re-init at the new measurement, got {returned} "
+        f"(expected {far}); a non-far return means the >5m guard regressed"
+    )
+    assert track.kf_state[0:3] == [far[0], far[1], far[2]]
+    assert track.kf_state[3:6] == [0.0, 0.0, 0.0], (
+        f"re-init must zero velocity, got {track.kf_state[3:6]}"
+    )
+
+
+# ---------- _is_stationary (ANDY-3) ----------
+#
+# ZUPT (zero-velocity update) is what kills phantom motion. The audit
+# flags this as P1 because the off-by-one risk between `radius_m` and
+# `radius_m²` would silently invert the threshold — tracks would be
+# called "stationary" when they're moving, freezing the velocity state
+# at zero and locking the dashboard position to a stale anchor.
+
+def test_is_stationary_returns_false_with_fewer_than_history_n_points(trail_at):
+    # Arrange — only ZUPT_HISTORY_N - 1 points; not enough history to
+    # decide stationarity yet. The function must return False so the
+    # Kalman update isn't ZUPT-clamped on insufficient evidence.
+    pts = trail_at([(0.0, 0.0, 1.0)] * (ZUPT_HISTORY_N - 1))
+
+    # Act
+    result = _is_stationary(pts, radius_m=0.7)
+
+    # Assert
+    assert result is False
+
+
+def test_is_stationary_returns_true_for_tight_cluster_inside_radius(trail_at):
+    # Arrange — exactly ZUPT_HISTORY_N points, max deviation from
+    # centroid is 0.05 m — well inside the 0.7 m default radius.
+    pts = trail_at([
+        (1.00, 2.00, 1.00),
+        (1.05, 2.00, 1.00),
+        (1.00, 2.05, 1.00),
+        (1.00, 2.00, 1.05),
+    ])
+    assert len(pts) == ZUPT_HISTORY_N
+
+    # Act
+    result = _is_stationary(pts, radius_m=0.7)
+
+    # Assert
+    assert result is True
+
+
+def test_is_stationary_returns_false_when_any_point_exceeds_radius(trail_at):
+    # Arrange — ZUPT_HISTORY_N points, three clustered near (0,0,0) and
+    # one moved 2 m away on x. The centroid sits at ~(0.5, 0, 0); the
+    # outlier is then ~1.5 m from centroid, well outside the 0.7 m
+    # radius. The function must reject the cluster as not stationary.
+    pts = trail_at([
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+    ])
+    assert len(pts) == ZUPT_HISTORY_N
+
+    # Act
+    result = _is_stationary(pts, radius_m=0.7)
+
+    # Assert — if this flips True after a refactor, an off-by-one
+    # between `radius_m` and `radius_m²` has snuck in.
+    assert result is False
