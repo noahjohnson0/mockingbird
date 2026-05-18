@@ -10,13 +10,13 @@ A general-purpose home mesh network platform. Capabilities get built on top
 of it over time; the network itself is the substrate. Built from the parts
 Noah already has on his desk:
 
-- 1 × **GL.iNet GL-SFT1200 "Opal"** as the network anchor. Joins
+- 1 × **GL.iNet GL-SFT1200 "Opal"** as the WiFi anchor. Joins
   `entropy-5G` upstream over WiFi-as-WAN, rebroadcasts its own `mockingbird`
-  SSID on 2.4 GHz, and runs **Tailscale as a subnet router** advertising
-  `192.168.8.0/24` so the whole mockingbird LAN is reachable from the tailnet.
-- 1 × **Raspberry Pi Zero W** as the processing/storage backend. Joins
-  `mockingbird` over WiFi. No on-device Tailscale — reaches the tailnet via
-  the Opal's subnet route.
+  SSID on 2.4 GHz, and NATs the mockingbird LAN out to the internet. **No
+  Tailscale on the Opal** — won't fit in 16 MB of flash (see Gotchas).
+- 1 × **Raspberry Pi Zero W** as the processing/storage backend and
+  **Tailscale subnet router** advertising `192.168.8.0/24`, so the whole
+  mockingbird LAN is reachable from the tailnet. Joins `mockingbird` over WiFi.
 - 10 × **ESP32-WROOM-32** boards composed into leaves (sensors, actuators,
   controllers). A "leaf" is a logical role, not necessarily one board —
   see "Node patterns" below.

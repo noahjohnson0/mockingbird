@@ -17,8 +17,7 @@
 A small home mesh network platform. A travel router as the WiFi anchor, a
 Raspberry Pi as the subnet router and processing/storage backend, and a
 fleet of ESP32 leaves — all reachable from a Tailscale tailnet via a
-single advertised subnet. The network is the substrate; capabilities get
-layered on top.
+single advertised subnet.
 
 ```
        ┌── Tailscale tailnet ─────────────────────────────────────┐
@@ -84,20 +83,21 @@ layered on top.
 - **Wire-format contract tests + canary** under `tests/`.
 
 See `docs/roadmap.md` for shipped-vs-planned and `docs/prds/` for the
-current Q3 capabilities (person fingerprinting, IMU on leaves, presence
-& anomaly alerts; spec-lock 2026-05-20).
+in-flight Q3 capabilities (person fingerprinting, IMU on leaves, presence
+& anomaly alerts).
 
 ## Layout
 
 ```
 .
-├── CLAUDE.md                          live project memory — start here
+├── CLAUDE.md                          design notes + decisions log
 ├── README.md                          this file
 ├── firmware/esp32-wroom-mockingbird/  live ESP32 firmware (PlatformIO +
 │                                      Arduino + NimBLE, OTA-enabled)
 ├── services/
 │   ├── mockingbird-collector.py       :9001 TCP server, writes SQLite
 │   ├── mockingbird-collector.service  systemd unit, auto-restart
+│   ├── mockingbird-dashboard.service  systemd unit, auto-restart
 │   ├── mockingbird-dashboard.py       :8080 dashboard backend
 │   ├── dashboard.html                 Three.js dashboard frontend
 │   ├── mockingbird_calibration.py     per-leaf TX/RX bias + path-loss
@@ -105,6 +105,7 @@ current Q3 capabilities (person fingerprinting, IMU on leaves, presence
 │   └── pi/                            wlan0 wedge mitigation configs
 ├── scripts/
 │   ├── bootstrap-pi-subnet-router.sh  idempotent Pi-side bootstrap
+│   ├── deploy-pi-wlan-fix.sh          wlan0 wedge mitigation deploy
 │   ├── gen-esp32-secrets.sh           generates firmware/src/secrets.h
 │   ├── ble-experiment.sh              SSH wrapper around the analyzer
 │   ├── analyze_ble_db.py              current SQLite-based analyzer
@@ -124,10 +125,12 @@ current Q3 capabilities (person fingerprinting, IMU on leaves, presence
 
 ## Bringing up the platform
 
-The canonical bootstrap covers the Pi side:
+The canonical bootstrap covers the Pi side. It expects
+`~/repos/.scratch/pi-creds.txt` and `~/repos/.scratch/mockingbird-wifi.txt`
+to exist locally (gitignored creds), and takes the Pi's current SSH host:
 
 ```bash
-./scripts/bootstrap-pi-subnet-router.sh
+./scripts/bootstrap-pi-subnet-router.sh <pi-host>   # e.g. 192.168.0.128
 ```
 
 It installs Tailscale, joins the project SSID, enables IP forwarding,
