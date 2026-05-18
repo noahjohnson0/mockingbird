@@ -1,8 +1,9 @@
-# mockingbird
-
-<p align="center">
-  <img src="docs/assets/mockingbird.png" alt="mockingbird" width="320">
-</p>
+<table border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td width="260" valign="middle"><img src="docs/assets/mockingbird.png" alt="mockingbird" width="240"></td>
+<td valign="middle"><h1>M&nbsp;O&nbsp;C&nbsp;K&nbsp;I&nbsp;N&nbsp;G&nbsp;B&nbsp;I&nbsp;R&nbsp;D</h1></td>
+</tr>
+</table>
 
 A small home mesh network platform. A travel router as the WiFi anchor, a
 Raspberry Pi as the subnet router and processing/storage backend, and a
