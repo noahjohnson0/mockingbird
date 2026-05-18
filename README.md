@@ -1,158 +1,176 @@
 # mockingbird
 
-A small home mesh network platform. A travel router as the anchor, a
-Raspberry Pi as the processing/storage backend, and a fleet of ESP32 leaves
-— all reachable from a Tailscale tailnet via a single subnet route. The
-network is general-purpose; capabilities get layered on as they're built.
+```
+                                  __
+                            __.--~. \
+                       __.-~        \\\
+                  _.-~~  __         _\\\
+              _.-~   _.-~  ~-_      /  \\\
+          _.-~   _.-~         ~-_  /    \\\
+      _.-~   _.-~                ~/______\\\__o>
+   .-~   _.-~                    /         \///
+        ~                       /          ||
+                                          /  \
+                                         /    \
+```
+
+A small home mesh network platform. A travel router as the WiFi anchor, a
+Raspberry Pi as the subnet router and processing/storage backend, and a
+fleet of ESP32 leaves — all reachable from a Tailscale tailnet via a
+single advertised subnet. The network is the substrate; capabilities get
+layered on top.
 
 ```
-        ┌── Tailscale tailnet ─────────────────────────────────┐
-        │                                                      │
-        │   Noah's Mac, phone, laptop, etc.                    │
-        │                  │                                   │
-        │                  │ via subnet route 192.168.8.0/24   │
-        └──────────────────┼───────────────────────────────────┘
-                           │
-                           ▼
-            ┌──────────────────────────────────┐
-            │ GL.iNet Opal "mockingbird-router"    │
-            │   WAN: upstream WiFi entropy-5G  │
-            │   LAN: 192.168.8.0/24            │
-            │   SSID: mockingbird (2.4 GHz)        │
-            │   Tailscale: subnet router       │
-            └─────────────┬────────────────────┘
-                          │ 2.4 GHz
-        ┌─────────────────┴────────────────────┐
-        │                                      │
- ┌──────────────┐                  ┌────────────────────────┐
- │ Pi Zero W    │ ◄── HTTP/MQTT ── │ ESP32 leaves ×10       │
- │ processing + │                  │ sensors / actuators +  │
- │ storage      │                  │ peer-to-peer mesh      │
- └──────────────┘                  └────────────────────────┘
+       ┌── Tailscale tailnet ─────────────────────────────────────┐
+       │                                                          │
+       │   Noah's Mac, phone, Windows GPU box, etc. — all reach   │
+       │   192.168.8.0/24 via the subnet route advertised by the  │
+       │   Pi.                                                    │
+       │                          │                               │
+       └──────────────────────────┼───────────────────────────────┘
+                                  │ wireguard
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │ Pi Zero W "mockingbird-pi"    │
+                  │   subnet router               │
+                  │   + collector + dashboard     │
+                  └───────────────┬───────────────┘
+                                  │ project SSID, 2.4 GHz
+        ┌─────────────────────────┴───────────────────────────┐
+        │                          │                          │
+   ┌──────────┐         ┌────────────────────┐    ┌──────────────────┐
+   │ Mac (dev)│         │ GL.iNet Opal       │    │ ESP32 leaves     │
+   │          │         │ WiFi AP + NAT      │    │ ×8 deployed      │
+   │          │         │ WAN → upstream     │    │ stream BLE obs   │
+   │          │         │ 192.168.8.1        │    │ → Pi:9001 (TCP)  │
+   └──────────┘         └────────────────────┘    └──────────────────┘
 ```
 
 ## Components
 
-- **GL.iNet GL-SFT1200 "Opal"** (the network anchor). Travel router running
-  GL.iNet's OpenWrt-based firmware. Connects to the household's upstream
-  WiFi (`entropy-5G`) via WiFi-as-WAN and rebroadcasts its own `mockingbird`
-  SSID on 2.4 GHz. Hosts the Tailscale subnet router so the whole
-  `192.168.8.0/24` LAN is reachable from any tailnet peer.
+- **GL.iNet GL-SFT1200 "Opal"** — the WiFi anchor and NAT box. Joins
+  an upstream household SSID over WiFi-as-WAN and rebroadcasts its own
+  project SSID on 2.4 GHz with `192.168.8.0/24`. Does **not**
+  run Tailscale — the daemon's ~67 MB of binaries don't fit on the
+  Opal's 16 MB flash. It's a dumb AP from the platform's perspective.
 
-- **Raspberry Pi Zero W** (processing + storage). Joins `mockingbird` over
-  WiFi. Aggregates data from the ESP32 leaves, runs whatever post-
-  processing each capability needs, and persists results. No on-device
-  Tailscale — reaches the tailnet via the Opal's subnet route.
+- **Raspberry Pi Zero W "mockingbird-pi"** — Tailscale subnet router
+  *and* the processing/storage backend. Joins the project SSID over
+  WiFi, runs `tailscale up --advertise-routes=192.168.8.0/24` so peers
+  reach everything on the LAN by 192.168.8.x. Hosts the BLE collector,
+  the live dashboard, and the SQLite store under `~/mockingbird/`.
 
-- **ESP32-WROOM-32 nodes ×10** (the leaves). Composed into logical
-  leaves — a "leaf" is a sensing/actuating role, not necessarily one
-  board. Two patterns:
-  - **Single-chip generalist** — one ESP32 doing WiFi STA + BLE scan
-    on the same radio. Time-sliced; ~30–70% BLE scan duty cycle when
-    WiFi is busy. Cheap to deploy, good for spatial coverage.
-  - **Paired specialist** — two ESP32s wired together via UART. One
-    BLE-only (~100% BLE duty cycle, WiFi disabled), one WiFi-only
-    (associated to `mockingbird`, forwards observations to the Pi).
-    Use for remote out-of-range BLE locations or critical-coverage
-    spots where you need clean RSSI + complete advert capture.
+- **ESP32-WROOM-32 leaves** (8 deployed, ~3 spare). Each joins the
+  project SSID, runs continuous NimBLE scanning, and **streams every
+  observation as a line of JSON over TCP to `mockingbird-pi:9001`**.
+  Discovery is mDNS-first (`mockingbird-pi.local`) with a build-time
+  fallback host; the cached IP self-invalidates on connect failure so
+  a Pi DHCP renumber heals the fleet automatically. HTTP on `:80`
+  exposes `GET /`, `GET /version`, `POST /restart`; ArduinoOTA listens
+  on UDP 3232.
 
-  See `CLAUDE.md` → "Node patterns" for the full rationale and the
-  recommended mix across 10 boards.
+## Shipped capabilities
 
-## Capabilities
+- **Distributed BLE sensing.** 8 leaves stream ~110 obs/sec aggregate
+  into the Pi's `observations.sqlite`. Zero drops, zero crashes under
+  continuous heavy scanning.
+- **MLE multilateration** with per-leaf TX/RX bias decomposition and a
+  path-loss solver.
+- **Kalman fusion + entity clustering.** Joseph-form Kalman with
+  Tikhonov-regularized solves; multi-MAC tracks survive Apple Continuity
+  MAC rotation. Adaptive ZUPT + velocity clamp kill phantom motion.
+- **Live Three.js web dashboard** on `:8080` — heatmap, trails,
+  click-to-select, bird codenames, north compass, debounced auto-save.
+- **Wire-format contract tests + canary** under `tests/`.
 
-The network is the substrate. Each capability is a deployable workload that
-runs across some subset of nodes.
-
-- [ ] **Distributed BLE sensing** — every ESP32 scans BLE advertisements
-  and publishes observations; the Pi de-duplicates by device address and
-  fuses RSSI across nodes for rough indoor positioning. Real protocol
-  sniffing of established BLE connections is delegated to a separate
-  nRF52840 dongle.
-- [ ] _(more — capabilities added as needed)_
+See `docs/roadmap.md` for shipped-vs-planned and `docs/prds/` for the
+current Q3 capabilities (person fingerprinting, IMU on leaves, presence
+& anomaly alerts; spec-lock 2026-05-20).
 
 ## Layout
 
 ```
 .
-├── CLAUDE.md                   project memory; read this for full context
-├── README.md                   this file
+├── CLAUDE.md                          live project memory — start here
+├── README.md                          this file
+├── firmware/esp32-wroom-mockingbird/  live ESP32 firmware (PlatformIO +
+│                                      Arduino + NimBLE, OTA-enabled)
+├── services/
+│   ├── mockingbird-collector.py       :9001 TCP server, writes SQLite
+│   ├── mockingbird-collector.service  systemd unit, auto-restart
+│   ├── mockingbird-dashboard.py       :8080 dashboard backend
+│   ├── dashboard.html                 Three.js dashboard frontend
+│   ├── mockingbird_calibration.py     per-leaf TX/RX bias + path-loss
+│   ├── mockingbird_tracks.py          Kalman fusion + entity clustering
+│   └── pi/                            wlan0 wedge mitigation configs
 ├── scripts/
-│   └── bootstrap-glinet-router.sh   Opal one-shot setup (WiFi-WAN, SSID,
-│                                    Tailscale, subnet route)
-├── main/                       aspirational ESP32-S3 firmware (MicroLink
-│                               + on-device Tailscale). Not flashed to
-│                               the current WROOM-32 fleet — see below.
-├── partitions.csv              two OTA slots, 8 MB flash (for the S3 path)
-├── sdkconfig.defaults          ESP-IDF + MicroLink tuning
-├── sdkconfig.credentials.example   copy → sdkconfig.credentials, fill in
-├── external/microlink/         git submodule, not initialized by default
-└── tools/ota_serve.py          HTTP server for pushing OTA builds
+│   ├── bootstrap-pi-subnet-router.sh  idempotent Pi-side bootstrap
+│   ├── gen-esp32-secrets.sh           generates firmware/src/secrets.h
+│   ├── ble-experiment.sh              SSH wrapper around the analyzer
+│   ├── analyze_ble_db.py              current SQLite-based analyzer
+│   └── analyze_ble_capture.py         legacy JSON-file analyzer
+├── tests/                             pytest — wire contract, RF math,
+│                                      Kalman stability, track smoothing
+├── docs/
+│   ├── roadmap.md
+│   ├── prds/                          Q3 PRDs
+│   └── ops/                           runbooks + RCAs
+├── main/                              aspirational ESP-IDF firmware for
+│                                      future ESP32-S3 hardware — NOT
+│                                      built or flashed on the fleet
+├── tools/ota_serve.py                 OTA push helper
+└── partitions.csv / sdkconfig.*       ESP32-S3 build inputs (main/)
 ```
 
-## Setting up the Opal
+## Bringing up the platform
 
-Run the bootstrap script against the Opal once it's powered up with SSH
-access and a Tailscale auth key staged:
+The canonical bootstrap covers the Pi side:
 
 ```bash
-# One-time prereqs (manual)
-ssh-copy-id glinet-new                       # install SSH key on the router
-echo "SSID=entropy-5G"   > ~/repos/.scratch/wifi.txt
-echo "PSK=..."          >> ~/repos/.scratch/wifi.txt
-# generate at https://login.tailscale.com/admin/settings/keys
-echo "tskey-auth-..." > ~/repos/.scratch/tailscale-authkey
-
-# Bootstrap
-./scripts/bootstrap-glinet-router.sh
+./scripts/bootstrap-pi-subnet-router.sh
 ```
 
-The script:
-1. Renames the device to `mockingbird-router`
-2. Joins `entropy-5G` as upstream (WiFi-as-WAN repeater mode)
-3. Rebroadcasts the new `mockingbird` SSID on 2.4 GHz (auto-generated PSK,
-   saved to `~/repos/.scratch/mockingbird-wifi.txt`)
-4. Installs the Tailscale package and runs `tailscale up` with the staged
-   authkey, `--advertise-routes=192.168.8.0/24`
+It installs Tailscale, joins the project SSID, enables IP forwarding,
+and advertises `192.168.8.0/24`. Approve the subnet route once at
+<https://login.tailscale.com/admin/machines>; approval is sticky across
+reflashes, but the local `--advertise-routes` pref must be re-set each
+time the SD card is reimaged.
 
-After it runs, approve the subnet route in the Tailscale admin console
-(`https://login.tailscale.com/admin/machines`).
+The Opal is **not** scripted — it's a one-time stock-firmware setup:
+join the upstream household SSID as WiFi-as-WAN, rebroadcast the
+project SSID on 2.4 GHz, install `openssh-server` on port 2222 (the
+stock Dropbear 2017 doesn't accept modern keys).
 
-## Adding a leaf to mockingbird
+## Adding a leaf
 
-Any device that joins the `mockingbird` SSID with the PSK from
-`~/repos/.scratch/mockingbird-wifi.txt` becomes a member. From any tailnet
-peer it'll be reachable by its `192.168.8.x` LAN IP.
+Any device that joins the project SSID is a member; the PSK lives in
+a 0600 file outside the repo (path is in `CLAUDE.md`).
 
-For the Pi:
+For an ESP32:
 
 ```bash
-# from the Mac
-NM_KEY=$(awk -F= '/^PSK=/{print $2}' ~/repos/.scratch/mockingbird-wifi.txt)
-ssh pi@raspberrypi.local "
-  sudo nmcli connection add type wifi con-name mockingbird ifname wlan0 \
-       ssid mockingbird 802-11-wireless-security.key-mgmt wpa-psk \
-       wifi-sec.psk '$NM_KEY'
-  sudo nmcli connection up mockingbird
-"
+# regenerate firmware/.../src/secrets.h from your local creds file
+./scripts/gen-esp32-secrets.sh
+
+# first flash over USB
+cd firmware/esp32-wroom-mockingbird
+pio run -e usb -t upload
+
+# subsequent updates over OTA
+pio run -e ota -t upload --upload-port=mockingbird-<chipid>.local
 ```
 
-For an ESP32, set the WiFi credentials in whatever firmware you're flashing
-and reboot. (The `main/` firmware reads `CONFIG_WIFI_SSID` /
-`CONFIG_WIFI_PSK` from `sdkconfig.credentials`.)
+Verify with `curl http://mockingbird-<chipid>.local/` — the JSON
+response includes an `uplink` block (`connected`, `sent`, `dropped`,
+`q_depth`, `host:port`) showing the leaf is streaming to the Pi.
 
 ## The `main/` firmware
 
-`main/` holds an ESP-IDF firmware for **ESP32-S3** boards that joins the
-Tailscale tailnet directly via [MicroLink][microlink] — bypassing the
-subnet-router model entirely. It is **not** flashed to the current
-WROOM-32 fleet, which lack the PSRAM that MicroLink requires.
-
-Keep this code for when ESP32-S3 hardware arrives, or fork it for the
-WROOM-32 boards by dropping the MicroLink bits and pointing it at the
-Opal-subnet-route reachability model instead.
-
-See the section "Why not Tailscale on each ESP32?" in `CLAUDE.md` for
-the full rationale.
+`main/` holds an ESP-IDF design for **ESP32-S3** boards that would join
+the tailnet directly via [MicroLink][microlink] — bypassing the subnet
+router entirely. It is **not** flashed to the current WROOM-32 fleet,
+which lack the PSRAM MicroLink requires. Kept for when S3 hardware
+arrives; the rationale is in `CLAUDE.md` under "Why not Tailscale on
+each ESP32?".
 
 [microlink]: https://github.com/CamM2325/microlink
