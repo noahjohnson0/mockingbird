@@ -5,10 +5,17 @@
 </tr>
 </table>
 
-A small home mesh network platform. A travel router as the WiFi anchor, a
-Raspberry Pi as the subnet router and processing/storage backend, and a
-fleet of ESP32 leaves — all reachable from a Tailscale tailnet via a
-single advertised subnet.
+**Mockingbird turns a handful of ESP32 boards into a building-scale Bluetooth
+sensing array.** The leaves scan BLE advertisements continuously; a Raspberry
+Pi fuses their RSSI readings (MLE multilateration + Kalman filtering) into live
+positions for every nearby phone, watch, and tag, rendered on a 3D web
+dashboard.
+
+Underneath sits a small home mesh network: a travel router as the WiFi anchor,
+the Pi as subnet router and processing/storage backend, and the fleet of ESP32
+leaves, all reachable from a Tailscale tailnet via a single advertised subnet.
+The network is the substrate; BLE sensing is the first capability built on top
+of it.
 
 ```
        ┌── Tailscale tailnet ─────────────────────────────────────┐
@@ -58,6 +65,8 @@ single advertised subnet.
   a Pi DHCP renumber heals the fleet automatically. HTTP on `:80`
   exposes `GET /`, `GET /version`, `POST /restart`; ArduinoOTA listens
   on UDP 3232.
+
+![live device-tracking dashboard](docs/assets/dashboard.png)
 
 ## Shipped capabilities
 
@@ -166,5 +175,9 @@ router entirely. It is **not** flashed to the current WROOM-32 fleet,
 which lack the PSRAM MicroLink requires. Kept for when S3 hardware
 arrives; the rationale is in `CLAUDE.md` under "Why not Tailscale on
 each ESP32?".
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 [microlink]: https://github.com/CamM2325/microlink
