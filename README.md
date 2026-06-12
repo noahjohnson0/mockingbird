@@ -1,6 +1,11 @@
 <table border="0" cellspacing="0" cellpadding="0">
 <tr>
-<td width="260" valign="middle"><img src="docs/assets/mockingbird.png" alt="mockingbird" width="240"></td>
+<td width="220" valign="middle">
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.png">
+<img src="docs/assets/logo-light.png" alt="mockingbird" width="200">
+</picture>
+</td>
 <td valign="middle"><h1>M&nbsp;O&nbsp;C&nbsp;K&nbsp;I&nbsp;N&nbsp;G&nbsp;B&nbsp;I&nbsp;R&nbsp;D</h1></td>
 </tr>
 </table>
@@ -152,7 +157,6 @@ a 0600 file outside the repo (path is in `CLAUDE.md`).
 For an ESP32:
 
 ```bash
-# regenerate firmware/.../src/secrets.h from your local creds file
 ./scripts/gen-esp32-secrets.sh
 
 # first flash over USB
