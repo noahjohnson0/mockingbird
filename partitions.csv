@@ -1,0 +1,11 @@
+# Custom partition table — 8 MB flash, two OTA slots.
+# Each OTA app slot is ~4 MB which is comfortable for an ESP-IDF + MicroLink build.
+# If you flash to a board with a different flash size, regenerate this file
+# and update CONFIG_ESPTOOLPY_FLASHSIZE_* in sdkconfig.defaults.
+#
+# Name,    Type, SubType,  Offset,    Size,     Flags
+nvs,       data, nvs,      0x9000,    0x10000,
+otadata,   data, ota,      0x19000,   0x2000,
+phy_init,  data, phy,      0x1b000,   0x1000,
+ota_0,     app,  ota_0,    0x20000,   0x3F0000,
+ota_1,     app,  ota_1,    0x410000,  0x3F0000,

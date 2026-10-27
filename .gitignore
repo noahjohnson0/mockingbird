@@ -1,0 +1,29 @@
+# ESP-IDF / CMake build artifacts
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Credentials — never commit
+sdkconfig.credentials
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Claude Code workspace artifacts (the agents themselves are tracked,
+# but worktrees and agent-memory are local-only)
+.claude/worktrees/
+.claude/agent-memory/
+
+# Python caches
+__pycache__/
+*.pyc
+.venv-test/

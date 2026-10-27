@@ -1,0 +1,23 @@
+# Installed at: /etc/systemd/system/mockingbird-wlan-watchdog.service
+#
+# Safety-net watchdog for the Pi's wlan0. Paired with
+# mockingbird-wlan-watchdog.timer (runs this every 60s).
+#
+# Context: docs/ops/rca/2026-05-13-pi-wlan0-wedge.md (MAC-3).
+
+[Unit]
+Description=Mockingbird wlan0 watchdog (ping/reconnect/reboot escalation)
+Documentation=file:///home/pi/mockingbird/docs/ops/rca/2026-05-13-pi-wlan0-wedge.md
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mockingbird-wlan-watchdog.sh
+# Intentionally NOT sandboxed hard — needs to run nmcli, systemctl reboot,
+# write /run, and emit syslog. Keep it minimal but operational.
+Nice=10
+TimeoutStartSec=30s
+
+[Install]
+# No [Install] target — driven by the .timer unit.

@@ -1,0 +1,22 @@
+# Installed at: /etc/systemd/system/mockingbird-wlan-watchdog.timer
+#
+# Drives mockingbird-wlan-watchdog.service every 60s.
+#
+# Context: docs/ops/rca/2026-05-13-pi-wlan0-wedge.md (MAC-3).
+
+[Unit]
+Description=Run the Mockingbird wlan0 watchdog every 60s
+
+[Timer]
+# Start 30s after boot (give NetworkManager a moment to come up cleanly,
+# we don't want the first tick to false-positive into a reconnect).
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=mockingbird-wlan-watchdog.service
+# Persist across reboots — pre-boot misses don't matter, but if we ever
+# stop the timer manually, we want it to come back on reboot.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
